@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Run CI
+        run: go run ./cmd/scripts ci
+
+  build:
+    name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
+    needs: validate
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Set up Go
+        uses: actions/setup-go@v6.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Build artifact
+        id: build
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="aws-mcp-proxy-${{ matrix.goos }}-${{ matrix.goarch }}"
+          binary="aws-mcp-proxy"
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            binary="${binary}.exe"
+          fi
+          mkdir -p "bin/${base}"
+          go run ./cmd/scripts build \
+            --goos "${{ matrix.goos }}" \
+            --goarch "${{ matrix.goarch }}" \
+            --output "bin/${base}/${binary}"
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
+            (cd bin && zip -r "${base}.zip" "${base}")
+            artifact="${base}.zip"
+          else
+            tar -C bin -czf "bin/${base}.tar.gz" "${base}"
+            artifact="${base}.tar.gz"
+          fi
+          (cd bin && shasum -a 256 "${artifact}" > "${artifact}.sha256")
+          echo "artifact=${artifact}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7.0.1
+        with:
+          name: ${{ steps.build.outputs.artifact }}
+          path: |
+            bin/${{ steps.build.outputs.artifact }}
+            bin/${{ steps.build.outputs.artifact }}.sha256
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v8.0.1
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1 || \
+            gh release create "${GITHUB_REF_NAME}" --title "${GITHUB_REF_NAME}" --notes ""
+          gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
