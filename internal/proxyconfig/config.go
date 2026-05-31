@@ -30,6 +30,7 @@ type Input struct {
 	Service  string
 	Profiles []string
 	Region   string
+	CaBundle string
 	Metadata []string
 
 	ReadOnly bool
@@ -51,6 +52,7 @@ type Config struct {
 	Service  string
 	Profiles []string
 	Region   string
+	CaBundle string
 	Metadata map[string]string
 
 	ReadOnly bool
@@ -126,11 +128,17 @@ func Resolve(input Input, env Env) (Config, error) {
 		return Config{}, err
 	}
 
+	caBundle := input.CaBundle
+	if caBundle == "" {
+		caBundle, _ = env.LookupEnv("AWS_CA_BUNDLE")
+	}
+
 	return Config{
 		Endpoint:         input.Endpoint,
 		Service:          service,
 		Profiles:         resolveProfiles(input.Profiles, env),
 		Region:           region,
+		CaBundle:         caBundle,
 		Metadata:         metadata,
 		ReadOnly:         input.ReadOnly,
 		LogLevel:         input.LogLevel,

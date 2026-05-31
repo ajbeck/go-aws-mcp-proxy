@@ -4,13 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
+
+	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxyconfig"
 )
 
 type staticCredentials struct {
@@ -167,6 +173,48 @@ func TestInjectMetadataLeavesNonJSONRPCBodyUnchanged(t *testing.T) {
 	}
 }
 
+func TestNewClientTrustsCABundle(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer server.Close()
+
+	bundlePath := filepath.Join(t.TempDir(), "ca.pem")
+	writeCertificateBundle(t, bundlePath, server.Certificate().Raw)
+
+	client, err := NewClient(context.Background(), proxyconfig.Config{
+		CaBundle: bundlePath,
+		SkipAuth: true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	resp, err := client.Get(server.URL)
+	if err != nil {
+		t.Fatalf("client.Get() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d", resp.StatusCode)
+	}
+}
+
+func TestNewTransportRejectsInvalidCABundle(t *testing.T) {
+	bundlePath := filepath.Join(t.TempDir(), "invalid.pem")
+	if err := os.WriteFile(bundlePath, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
+
+	_, err := NewTransport(context.Background(), proxyconfig.Config{
+		CaBundle: bundlePath,
+		SkipAuth: true,
+	}, http.DefaultTransport)
+	if err == nil {
+		t.Fatal("NewTransport() error = nil")
+	}
+}
+
 func TestRedactHeader(t *testing.T) {
 	if got := RedactHeader("Authorization", "secret"); got != "[REDACTED]" {
 		t.Fatalf("Authorization redaction = %q", got)
@@ -185,4 +233,16 @@ func newJSONRequest(t *testing.T, body string) *http.Request {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	return req
+}
+
+func writeCertificateBundle(t *testing.T, path string, der []byte) {
+	t.Helper()
+
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	if pemBytes == nil {
+		t.Fatal("EncodeToMemory() returned nil")
+	}
+	if err := os.WriteFile(path, pemBytes, 0o600); err != nil {
+		t.Fatalf("write bundle: %v", err)
+	}
 }

@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -63,9 +66,26 @@ func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client) (
 }
 
 func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTripper) (*Transport, error) {
+	if base == nil {
+		base = http.DefaultTransport
+	}
+
+	var caBundle []byte
+	var err error
+	if cfg.CaBundle != "" {
+		caBundle, err = readCABundle(cfg.CaBundle)
+		if err != nil {
+			return nil, err
+		}
+		base, err = transportWithCABundle(base, cfg.CaBundle, caBundle)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	var provider CredentialsProvider
 	if !cfg.SkipAuth {
-		awsCfg, err := loadAWSConfig(ctx, cfg)
+		awsCfg, err := loadAWSConfig(ctx, cfg, caBundle)
 		if err != nil {
 			return nil, err
 		}
@@ -84,12 +104,15 @@ func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTr
 	}, nil
 }
 
-func loadAWSConfig(ctx context.Context, cfg proxyconfig.Config) (aws.Config, error) {
+func loadAWSConfig(ctx context.Context, cfg proxyconfig.Config, caBundle []byte) (aws.Config, error) {
 	options := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 	}
 	if len(cfg.Profiles) > 0 {
 		options = append(options, config.WithSharedConfigProfile(cfg.Profiles[0]))
+	}
+	if len(caBundle) > 0 {
+		options = append(options, config.WithCustomCABundle(bytes.NewReader(caBundle)))
 	}
 	return config.LoadDefaultConfig(ctx, options...)
 }
@@ -99,6 +122,42 @@ func baseTransport(client *http.Client) http.RoundTripper {
 		return client.Transport
 	}
 	return http.DefaultTransport
+}
+
+func readCABundle(path string) ([]byte, error) {
+	bundle, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read CA bundle %q: %w", path, err)
+	}
+	return bundle, nil
+}
+
+func transportWithCABundle(base http.RoundTripper, path string, bundle []byte) (http.RoundTripper, error) {
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("CA bundle %q requires an *http.Transport base, got %T", path, base)
+	}
+
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		return nil, fmt.Errorf("load system certificate pool: %w", err)
+	}
+	if pool == nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(bundle) {
+		return nil, fmt.Errorf("CA bundle %q does not contain PEM certificates", path)
+	}
+
+	cloned := transport.Clone()
+	tlsConfig := cloned.TLSClientConfig.Clone()
+	if tlsConfig == nil {
+		tlsConfig = &tls.Config{}
+	}
+	tlsConfig.RootCAs = pool
+	cloned.TLSClientConfig = tlsConfig
+
+	return cloned, nil
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {

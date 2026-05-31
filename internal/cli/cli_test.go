@@ -28,6 +28,7 @@ func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
 	code := Run(context.Background(), []string{
 		"https://bedrock-agentcore.us-east-1.amazonaws.com/mcp",
 		"--profile", "default", "dev",
+		"--ca-bundle", "/tmp/company-ca.pem",
 		"--metadata", "team=platform", "AWS_REGION=us-west-2",
 		"--read-only",
 		"--log-level", "DEBUG",
@@ -66,6 +67,9 @@ func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
 	}
 	if got := strings.Join(cfg.Profiles, ","); got != "default,dev" {
 		t.Fatalf("Profiles = %q", got)
+	}
+	if cfg.CaBundle != "/tmp/company-ca.pem" {
+		t.Fatalf("CaBundle = %q", cfg.CaBundle)
 	}
 	if cfg.Metadata["team"] != "platform" {
 		t.Fatalf("Metadata team = %q", cfg.Metadata["team"])

@@ -40,6 +40,7 @@ type app struct {
 	Service  string   `help:"AWS service name for SigV4 signing. Inferred from endpoint when omitted."`
 	Profiles []string `name:"profile" help:"AWS profile(s) to use. First profile is the default." sep:"none" placeholder:"PROFILE"`
 	Region   string   `help:"AWS region to sign. Inferred from endpoint or AWS_REGION when omitted."`
+	CaBundle string   `name:"ca-bundle" help:"Path to a PEM certificate bundle to trust in addition to the system roots." placeholder:"PATH"`
 
 	Metadata []string `help:"Metadata to inject into MCP requests as key=value pairs." sep:"none" placeholder:"KEY=VALUE"`
 
@@ -140,6 +141,7 @@ func (a *app) Run(ctx context.Context, runner ProxyRunner, env proxyconfig.Env) 
 		Service:          a.Service,
 		Profiles:         a.Profiles,
 		Region:           a.Region,
+		CaBundle:         a.CaBundle,
 		Metadata:         a.Metadata,
 		ReadOnly:         a.ReadOnly,
 		LogLevel:         a.LogLevel,
