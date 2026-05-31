@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -23,8 +24,10 @@ type UpstreamConnector interface {
 }
 
 type UpstreamSession interface {
+	CallTool(context.Context, *mcp.CallToolParams) (*mcp.CallToolResult, error)
 	Close() error
 	InitializeResult() *mcp.InitializeResult
+	ListTools(context.Context, *mcp.ListToolsParams) (*mcp.ListToolsResult, error)
 }
 
 type Runner struct {
@@ -52,11 +55,13 @@ type Runtime struct {
 	transport mcp.Transport
 	version   string
 
+	server   *mcp.Server
 	upstream upstreamState
 }
 
 func (r *Runtime) Run(ctx context.Context) error {
 	server := r.newServer()
+	r.server = server
 	server.AddReceivingMiddleware(r.initializeMiddleware())
 
 	transport := r.transport
@@ -103,6 +108,10 @@ func (r *Runtime) initializeMiddleware() mcp.Middleware {
 			if err != nil {
 				return nil, err
 			}
+			if err := r.registerUpstreamTools(ctx, upstream); err != nil {
+				_ = r.upstream.Close()
+				return nil, err
+			}
 
 			result, err := next(ctx, method, req)
 			if err != nil {
@@ -118,6 +127,51 @@ func (r *Runtime) initializeMiddleware() mcp.Middleware {
 			return initializeResult, nil
 		}
 	}
+}
+
+func (r *Runtime) registerUpstreamTools(ctx context.Context, upstream UpstreamSession) error {
+	result, err := upstream.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		return err
+	}
+	if result == nil {
+		return nil
+	}
+
+	for _, tool := range filterTools(result.Tools, r.config.ReadOnly) {
+		r.registerTool(tool, upstream)
+	}
+	return nil
+}
+
+func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
+	if tool == nil || tool.Name == "" {
+		return
+	}
+
+	localTool := cloneTool(tool)
+	localTool.InputSchema = normalizedInputSchema(localTool.InputSchema)
+	if localTool.OutputSchema != nil && !schemaIsObject(localTool.OutputSchema) {
+		localTool.OutputSchema = nil
+	}
+
+	r.server.AddTool(localTool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		callCtx := ctx
+		cancel := func() {}
+		if r.config.ToolTimeout > 0 {
+			callCtx, cancel = context.WithTimeout(ctx, r.config.ToolTimeout)
+		}
+		defer cancel()
+
+		result, err := upstream.CallTool(callCtx, &mcp.CallToolParams{
+			Name:      req.Params.Name,
+			Arguments: rawArguments(req.Params.Arguments),
+		})
+		if err != nil {
+			return toolErrorResult(req.Params.Name, err), nil
+		}
+		return result, nil
+	})
 }
 
 func (r *Runtime) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
@@ -139,6 +193,73 @@ func applyUpstreamCapabilities(local, upstream *mcp.InitializeResult) {
 		return
 	}
 	local.Capabilities = upstream.Capabilities
+}
+
+func filterTools(tools []*mcp.Tool, readOnly bool) []*mcp.Tool {
+	if !readOnly {
+		return tools
+	}
+
+	var filtered []*mcp.Tool
+	for _, tool := range tools {
+		if tool != nil && tool.Annotations != nil && tool.Annotations.ReadOnlyHint {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
+}
+
+func cloneTool(tool *mcp.Tool) *mcp.Tool {
+	clone := *tool
+	if tool.Annotations != nil {
+		annotations := *tool.Annotations
+		clone.Annotations = &annotations
+	}
+	return &clone
+}
+
+func normalizedInputSchema(schema any) any {
+	if schemaIsObject(schema) {
+		return schema
+	}
+	return map[string]any{"type": "object"}
+}
+
+func schemaIsObject(schema any) bool {
+	switch s := schema.(type) {
+	case map[string]any:
+		return s["type"] == "object"
+	case json.RawMessage:
+		var decoded map[string]any
+		if err := json.Unmarshal(s, &decoded); err != nil {
+			return false
+		}
+		return decoded["type"] == "object"
+	case []byte:
+		var decoded map[string]any
+		if err := json.Unmarshal(s, &decoded); err != nil {
+			return false
+		}
+		return decoded["type"] == "object"
+	default:
+		return false
+	}
+}
+
+func rawArguments(arguments json.RawMessage) any {
+	if len(arguments) == 0 {
+		return map[string]any{}
+	}
+	return arguments
+}
+
+func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: fmt.Sprintf("Tool call %q failed: %v. Please retry.", toolName, err)},
+		},
+		IsError: true,
+	}
 }
 
 type MCPUpstreamConnector struct {
