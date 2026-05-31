@@ -14,7 +14,7 @@ var version = "dev"
 func main() {
 	os.Exit(cli.Run(context.Background(), os.Args[1:], cli.Options{
 		Env:     proxyconfig.OSEnv{},
-		Runner:  proxy.Runner{},
+		Runner:  proxy.Runner{Version: version},
 		Stderr:  os.Stderr,
 		Stdout:  os.Stdout,
 		Version: version,
