@@ -86,6 +86,7 @@ func smokeAWSMCP(args []string, stdout, stderr io.Writer) error {
 
 	var metadata stringList
 	endpoint := flags.String("endpoint", "https://aws-mcp.us-east-1.api.aws/mcp", "AWS MCP endpoint URL")
+	caBundle := flags.String("ca-bundle", "", "PEM certificate bundle to trust")
 	profile := flags.String("profile", "", "AWS profile to use")
 	region := flags.String("region", "us-east-1", "AWS signing region")
 	service := flags.String("service", "aws-mcp", "AWS signing service")
@@ -114,6 +115,9 @@ func smokeAWSMCP(args []string, stdout, stderr io.Writer) error {
 	}
 	if *profile != "" {
 		proxyArgs = append(proxyArgs, "--profile", *profile)
+	}
+	if *caBundle != "" {
+		proxyArgs = append(proxyArgs, "--ca-bundle", *caBundle)
 	}
 	if *skipAuth {
 		proxyArgs = append(proxyArgs, "--skip-auth")

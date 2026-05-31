@@ -100,6 +100,40 @@ func TestResolveProfiles(t *testing.T) {
 	}
 }
 
+func TestResolveCABundle(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		env   MapEnv
+		want  string
+	}{
+		{name: "cli value wins", input: "/cli/ca.pem", env: MapEnv{"AWS_CA_BUNDLE": "/env/ca.pem"}, want: "/cli/ca.pem"},
+		{name: "env fallback", env: MapEnv{"AWS_CA_BUNDLE": "/env/ca.pem"}, want: "/env/ca.pem"},
+		{name: "unset", env: MapEnv{}, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := Resolve(Input{
+				Endpoint:       "https://service.us-east-1.api.aws/mcp",
+				CaBundle:       tt.input,
+				LogLevel:       "ERROR",
+				Timeout:        time.Second,
+				ConnectTimeout: time.Second,
+				ReadTimeout:    time.Second,
+				WriteTimeout:   time.Second,
+				ToolTimeout:    time.Second,
+			}, tt.env)
+			if err != nil {
+				t.Fatalf("Resolve() error = %v", err)
+			}
+			if cfg.CaBundle != tt.want {
+				t.Fatalf("CaBundle = %q, want %q", cfg.CaBundle, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveRejectsInvalidEndpointSchemes(t *testing.T) {
 	tests := []string{
 		"service.us-east-1.api.aws/mcp",
