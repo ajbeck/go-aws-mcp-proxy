@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -12,6 +13,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 const (
@@ -47,6 +51,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		return exitCode(stderr, clean(stderr))
 	case "ci", "build:all":
 		return exitCode(stderr, ci(stdout, stderr))
+	case "smoke:aws-mcp":
+		return exitCode(stderr, smokeAWSMCP(args[1:], stdout, stderr))
 	default:
 		fmt.Fprintf(stderr, "unknown command %q\n\n", args[0])
 		printUsage(stderr)
@@ -67,9 +73,124 @@ func printUsage(w io.Writer) {
 	fmt.Fprintln(w, "  fmt:check   verify Go files are formatted")
 	fmt.Fprintln(w, "  clean       remove build output")
 	fmt.Fprintln(w, "  ci          clean, format-check, vet, build, and test")
+	fmt.Fprintln(w, "  smoke:aws-mcp")
+	fmt.Fprintln(w, "              live smoke test against the AWS MCP endpoint")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Aliases:")
 	fmt.Fprintln(w, "  build:all   same as ci")
+}
+
+func smokeAWSMCP(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("smoke:aws-mcp", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+
+	var metadata stringList
+	endpoint := flags.String("endpoint", "https://aws-mcp.us-east-1.api.aws/mcp", "AWS MCP endpoint URL")
+	profile := flags.String("profile", "", "AWS profile to use")
+	region := flags.String("region", "us-east-1", "AWS signing region")
+	service := flags.String("service", "aws-mcp", "AWS signing service")
+	skipAuth := flags.Bool("skip-auth", true, "skip SigV4 signing")
+	timeout := flags.Duration("timeout", 90*time.Second, "smoke test timeout")
+	flags.Var(&metadata, "metadata", "metadata key=value to inject; repeatable")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("smoke:aws-mcp does not accept positional arguments: %s", strings.Join(flags.Args(), " "))
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+
+	proxyArgs := []string{
+		"run",
+		appPackage,
+		*endpoint,
+		"--region", *region,
+		"--service", *service,
+	}
+	for _, item := range metadata.values {
+		proxyArgs = append(proxyArgs, "--metadata", item)
+	}
+	if *profile != "" {
+		proxyArgs = append(proxyArgs, "--profile", *profile)
+	}
+	if *skipAuth {
+		proxyArgs = append(proxyArgs, "--skip-auth")
+	}
+
+	cmd := exec.CommandContext(ctx, "go", proxyArgs...)
+	cmd.Stderr = stderr
+	transport := &mcp.CommandTransport{
+		Command:           cmd,
+		TerminateDuration: 5 * time.Second,
+	}
+	client := mcp.NewClient(&mcp.Implementation{Name: "aws-mcp-smoke", Version: "dev"}, nil)
+	session, err := client.Connect(ctx, transport, nil)
+	if err != nil {
+		return fmt.Errorf("connect through proxy: %w", err)
+	}
+	defer session.Close()
+
+	tools, err := session.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		return fmt.Errorf("list tools: %w", err)
+	}
+	if !hasTool(tools.Tools, "aws___search_documentation") {
+		return fmt.Errorf("expected tool aws___search_documentation, got %s", toolNames(tools.Tools))
+	}
+
+	result, err := session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "aws___search_documentation",
+		Arguments: map[string]any{
+			"search_phrase": "Amazon S3 bucket naming rules",
+			"limit":         1,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("call aws___search_documentation: %w", err)
+	}
+	if result == nil {
+		return fmt.Errorf("call aws___search_documentation returned nil result")
+	}
+	if result.IsError {
+		return fmt.Errorf("call aws___search_documentation returned tool error")
+	}
+
+	fmt.Fprintf(stdout, "AWS MCP smoke passed: listed %d tools and called aws___search_documentation\n", len(tools.Tools))
+	return nil
+}
+
+func hasTool(tools []*mcp.Tool, name string) bool {
+	for _, tool := range tools {
+		if tool != nil && tool.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func toolNames(tools []*mcp.Tool) string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if tool != nil {
+			names = append(names, tool.Name)
+		}
+	}
+	return strings.Join(names, ", ")
+}
+
+type stringList struct {
+	values []string
+}
+
+func (l *stringList) String() string {
+	return strings.Join(l.values, ",")
+}
+
+func (l *stringList) Set(value string) error {
+	l.values = append(l.values, value)
+	return nil
 }
 
 func build(args []string, stdout, stderr io.Writer) error {

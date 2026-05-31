@@ -10,6 +10,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/ajbeck/go-aws-mcp-proxy/internal/awshttp"
 	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxyconfig"
 )
 
@@ -272,6 +273,10 @@ func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg proxyconfig.Confi
 	if version == "" {
 		version = "dev"
 	}
+	httpClient, err := awshttp.NewClient(ctx, cfg, c.HTTPClient)
+	if err != nil {
+		return nil, err
+	}
 
 	client := mcp.NewClient(&mcp.Implementation{
 		Name:    defaultName,
@@ -281,7 +286,7 @@ func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg proxyconfig.Confi
 
 	return client.Connect(ctx, &mcp.StreamableClientTransport{
 		Endpoint:   cfg.Endpoint,
-		HTTPClient: c.HTTPClient,
+		HTTPClient: httpClient,
 	}, nil)
 }
 
