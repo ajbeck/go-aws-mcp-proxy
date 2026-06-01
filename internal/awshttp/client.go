@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -46,14 +47,18 @@ type Transport struct {
 	Clock       Clock
 	Credentials CredentialsProvider
 	Metadata    map[string]string
+	Logger      *slog.Logger
+	Profile     string
 	Region      string
+	Retries     int
+	RetryDelay  func(int) time.Duration
 	Service     string
 	Signer      Signer
 	SkipAuth    bool
 }
 
-func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client) (*http.Client, error) {
-	transport, err := NewTransport(ctx, cfg, baseTransport(base))
+func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client, loggers ...*slog.Logger) (*http.Client, error) {
+	transport, err := NewTransport(ctx, cfg, baseTransport(base), loggers...)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +74,7 @@ func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client) (
 	return &client, nil
 }
 
-func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTripper) (*Transport, error) {
+func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTripper, loggers ...*slog.Logger) (*Transport, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -106,12 +111,29 @@ func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTr
 		Base:        base,
 		Clock:       SystemClock{},
 		Credentials: provider,
+		Logger:      firstLogger(loggers),
 		Metadata:    cfg.Metadata,
+		Profile:     firstProfile(cfg.Profiles),
 		Region:      cfg.Region,
+		Retries:     cfg.Retries,
 		Service:     cfg.Service,
 		Signer:      v4.NewSigner(),
 		SkipAuth:    cfg.SkipAuth,
 	}, nil
+}
+
+func firstLogger(loggers []*slog.Logger) *slog.Logger {
+	if len(loggers) == 0 {
+		return nil
+	}
+	return loggers[0]
+}
+
+func firstProfile(profiles []string) string {
+	if len(profiles) == 0 {
+		return ""
+	}
+	return profiles[0]
 }
 
 func loadAWSConfig(ctx context.Context, cfg proxyconfig.Config, caBundle []byte) (aws.Config, error) {
@@ -257,22 +279,133 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 	body = injectMetadata(body, t.Metadata)
-	setBody(req, body)
 
-	if !t.SkipAuth {
-		if t.Credentials == nil {
-			return nil, fmt.Errorf("AWS credentials provider is not configured")
+	maxRetries := t.Retries
+	for attempt := 0; ; attempt++ {
+		attemptReq := req.Clone(req.Context())
+		setBody(attemptReq, body)
+
+		if !t.SkipAuth {
+			if t.Credentials == nil {
+				return nil, fmt.Errorf("AWS credentials provider is not configured")
+			}
+			credentials, err := t.Credentials.Retrieve(req.Context())
+			if err != nil {
+				return nil, fmt.Errorf("retrieve AWS credentials: %w", err)
+			}
+			if err := t.sign(attemptReq, body, credentials); err != nil {
+				return nil, err
+			}
 		}
-		credentials, err := t.Credentials.Retrieve(req.Context())
-		if err != nil {
-			return nil, fmt.Errorf("retrieve AWS credentials: %w", err)
+
+		start := time.Now()
+		resp, err := base.RoundTrip(attemptReq)
+		duration := time.Since(start)
+		t.logRequest(attemptReq, resp, err, attempt, duration)
+		if !t.shouldRetry(req.Context(), resp, err, attempt, maxRetries) {
+			return resp, err
 		}
-		if err := t.sign(req, body, credentials); err != nil {
+
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
+		t.logRetry(attemptReq, resp, err, attempt)
+		if err := waitForRetry(req.Context(), t.retryDelay(attempt)); err != nil {
 			return nil, err
 		}
 	}
+}
 
-	return base.RoundTrip(req)
+func (t *Transport) shouldRetry(ctx context.Context, resp *http.Response, err error, attempt, maxRetries int) bool {
+	if maxRetries <= 0 || attempt >= maxRetries || ctx.Err() != nil {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	return resp != nil && retryableStatus(resp.StatusCode)
+}
+
+func retryableStatus(status int) bool {
+	switch status {
+	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func (t *Transport) retryDelay(attempt int) time.Duration {
+	if t.RetryDelay != nil {
+		return t.RetryDelay(attempt)
+	}
+	delay := 100 * time.Millisecond * (1 << attempt)
+	if delay > 2*time.Second {
+		return 2 * time.Second
+	}
+	return delay
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func (t *Transport) logRequest(req *http.Request, resp *http.Response, err error, attempt int, duration time.Duration) {
+	if t.Logger == nil {
+		return
+	}
+
+	attrs := []any{
+		"method", req.Method,
+		"host", req.URL.Host,
+		"path", req.URL.Path,
+		"duration_ms", duration.Milliseconds(),
+		"attempt", attempt,
+		"profile", t.Profile,
+	}
+	if resp != nil {
+		attrs = append(attrs, "status", resp.StatusCode)
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+		t.Logger.Warn("upstream HTTP request failed", attrs...)
+		return
+	}
+	if resp != nil && resp.StatusCode >= 400 {
+		t.Logger.Warn("upstream HTTP request returned error status", attrs...)
+		return
+	}
+	t.Logger.Debug("upstream HTTP request completed", append(attrs, "headers", sanitizedHeaders(req.Header))...)
+}
+
+func (t *Transport) logRetry(req *http.Request, resp *http.Response, err error, attempt int) {
+	if t.Logger == nil {
+		return
+	}
+	attrs := []any{
+		"method", req.Method,
+		"host", req.URL.Host,
+		"path", req.URL.Path,
+		"attempt", attempt,
+		"next_attempt", attempt + 1,
+	}
+	if resp != nil {
+		attrs = append(attrs, "status", resp.StatusCode)
+	}
+	if err != nil {
+		attrs = append(attrs, "error", err)
+	}
+	t.Logger.Warn("retrying upstream HTTP request", attrs...)
 }
 
 func (t *Transport) sign(req *http.Request, body []byte, credentials aws.Credentials) error {
@@ -361,4 +494,16 @@ func RedactHeader(name, value string) string {
 	default:
 		return value
 	}
+}
+
+func sanitizedHeaders(headers http.Header) map[string][]string {
+	out := make(map[string][]string, len(headers))
+	for name, values := range headers {
+		redacted := make([]string, len(values))
+		for i, value := range values {
+			redacted[i] = RedactHeader(name, value)
+		}
+		out[name] = redacted
+	}
+	return out
 }

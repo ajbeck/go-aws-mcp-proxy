@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"time"
@@ -21,7 +22,7 @@ const (
 )
 
 type ProxyRunner interface {
-	RunProxy(context.Context, proxyconfig.Config) error
+	RunProxy(context.Context, proxyconfig.Config, *slog.Logger) error
 }
 
 type Options struct {
@@ -81,6 +82,7 @@ func Run(ctx context.Context, args []string, options Options) int {
 		kong.BindTo(ctx, (*context.Context)(nil)),
 		kong.BindTo(options.Env, (*proxyconfig.Env)(nil)),
 		kong.BindTo(options.Runner, (*ProxyRunner)(nil)),
+		kong.BindTo(options.Stderr, (*io.Writer)(nil)),
 	)
 	if err != nil {
 		fmt.Fprintln(options.Stderr, err)
@@ -135,7 +137,7 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-func (a *app) Run(ctx context.Context, runner ProxyRunner, env proxyconfig.Env) error {
+func (a *app) Run(ctx context.Context, runner ProxyRunner, env proxyconfig.Env, stderr io.Writer) error {
 	cfg, err := proxyconfig.Resolve(proxyconfig.Input{
 		Endpoint:         a.Endpoint,
 		Service:          a.Service,
@@ -158,7 +160,7 @@ func (a *app) Run(ctx context.Context, runner ProxyRunner, env proxyconfig.Env) 
 		return err
 	}
 
-	return runner.RunProxy(ctx, cfg)
+	return runner.RunProxy(ctx, cfg, newLogger(cfg.LogLevel, stderr))
 }
 
 func seconds(value float64) time.Duration {
@@ -188,6 +190,24 @@ func normalizeMultiValueFlags(args []string) []string {
 
 type notImplementedRunner struct{}
 
-func (notImplementedRunner) RunProxy(context.Context, proxyconfig.Config) error {
+func (notImplementedRunner) RunProxy(context.Context, proxyconfig.Config, *slog.Logger) error {
 	return errors.New("proxy runtime is not implemented yet")
+}
+
+func newLogger(levelName string, w io.Writer) *slog.Logger {
+	level := slog.LevelError
+	switch strings.ToUpper(levelName) {
+	case "DEBUG":
+		level = slog.LevelDebug
+	case "INFO":
+		level = slog.LevelInfo
+	case "WARNING":
+		level = slog.LevelWarn
+	case "ERROR":
+		level = slog.LevelError
+	case "CRITICAL":
+		level = slog.LevelError + 4
+	}
+
+	return slog.New(slog.NewTextHandler(w, &slog.HandlerOptions{Level: level}))
 }

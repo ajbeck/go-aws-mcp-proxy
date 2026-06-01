@@ -92,7 +92,7 @@ func TestRuntimeConnectsUpstreamDuringInitialize(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"})
+		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -170,7 +170,7 @@ func TestRuntimeRegistersAndForwardsUpstreamTools(t *testing.T) {
 		errs <- runner.RunProxy(ctx, proxyconfig.Config{
 			Endpoint:    "https://service.us-east-1.api.aws/mcp",
 			ToolTimeout: 5 * time.Second,
-		})
+		}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -257,7 +257,7 @@ func TestRuntimeFiltersReadOnlyTools(t *testing.T) {
 		errs <- runner.RunProxy(ctx, proxyconfig.Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			ReadOnly: true,
-		})
+		}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -298,7 +298,7 @@ func TestRuntimeReturnsToolVisibleErrorOnUpstreamCallFailure(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"})
+		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -351,7 +351,7 @@ func TestRuntimeAppliesToolTimeout(t *testing.T) {
 		errs <- runner.RunProxy(ctx, proxyconfig.Config{
 			Endpoint:    "https://service.us-east-1.api.aws/mcp",
 			ToolTimeout: time.Millisecond,
-		})
+		}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -393,7 +393,7 @@ func TestRuntimeReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"})
+		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
