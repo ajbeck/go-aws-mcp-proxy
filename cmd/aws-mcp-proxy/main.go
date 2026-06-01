@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/ajbeck/go-aws-mcp-proxy/internal/cli"
 	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxy"
@@ -12,7 +14,10 @@ import (
 var version = "dev"
 
 func main() {
-	os.Exit(cli.Run(context.Background(), os.Args[1:], cli.Options{
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	os.Exit(cli.Run(ctx, os.Args[1:], cli.Options{
 		Env:     proxyconfig.OSEnv{},
 		Runner:  proxy.Runner{Version: version},
 		Stderr:  os.Stderr,

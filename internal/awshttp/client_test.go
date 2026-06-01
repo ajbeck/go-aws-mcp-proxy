@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -215,6 +216,69 @@ func TestNewTransportRejectsInvalidCABundle(t *testing.T) {
 	}
 }
 
+func TestNewClientAppliesTimeouts(t *testing.T) {
+	client, err := NewClient(context.Background(), proxyconfig.Config{
+		Timeout:        2 * time.Second,
+		ConnectTimeout: 3 * time.Second,
+		ReadTimeout:    4 * time.Second,
+		WriteTimeout:   5 * time.Second,
+		SkipAuth:       true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+
+	if client.Timeout != 2*time.Second {
+		t.Fatalf("client.Timeout = %s", client.Timeout)
+	}
+	proxyTransport, ok := client.Transport.(*Transport)
+	if !ok {
+		t.Fatalf("client.Transport type = %T", client.Transport)
+	}
+	base, ok := proxyTransport.Base.(*http.Transport)
+	if !ok {
+		t.Fatalf("proxy base transport type = %T", proxyTransport.Base)
+	}
+	if base.TLSHandshakeTimeout != 3*time.Second {
+		t.Fatalf("TLSHandshakeTimeout = %s", base.TLSHandshakeTimeout)
+	}
+	if base.ResponseHeaderTimeout != 4*time.Second {
+		t.Fatalf("ResponseHeaderTimeout = %s", base.ResponseHeaderTimeout)
+	}
+	if base.ExpectContinueTimeout != 5*time.Second {
+		t.Fatalf("ExpectContinueTimeout = %s", base.ExpectContinueTimeout)
+	}
+	if base.DialContext == nil {
+		t.Fatal("DialContext was not configured")
+	}
+}
+
+func TestDeadlineConnAppliesReadAndWriteDeadlines(t *testing.T) {
+	inner := &recordingConn{}
+	conn := &deadlineConn{
+		Conn:         inner,
+		readTimeout:  time.Second,
+		writeTimeout: 2 * time.Second,
+	}
+
+	buf := make([]byte, 1)
+	_, _ = conn.Read(buf)
+	_, _ = conn.Write([]byte("x"))
+
+	if inner.readDeadline.IsZero() {
+		t.Fatal("read deadline was not set")
+	}
+	if inner.writeDeadline.IsZero() {
+		t.Fatal("write deadline was not set")
+	}
+	if time.Until(inner.readDeadline) <= 0 {
+		t.Fatalf("read deadline is not in the future: %s", inner.readDeadline)
+	}
+	if time.Until(inner.writeDeadline) <= 0 {
+		t.Fatalf("write deadline is not in the future: %s", inner.writeDeadline)
+	}
+}
+
 func TestRedactHeader(t *testing.T) {
 	if got := RedactHeader("Authorization", "secret"); got != "[REDACTED]" {
 		t.Fatalf("Authorization redaction = %q", got)
@@ -222,6 +286,55 @@ func TestRedactHeader(t *testing.T) {
 	if got := RedactHeader("Accept", "application/json"); got != "application/json" {
 		t.Fatalf("Accept redaction = %q", got)
 	}
+}
+
+type recordingConn struct {
+	readDeadline  time.Time
+	writeDeadline time.Time
+}
+
+func (*recordingConn) Read([]byte) (int, error) {
+	return 0, io.EOF
+}
+
+func (*recordingConn) Write(b []byte) (int, error) {
+	return len(b), nil
+}
+
+func (*recordingConn) Close() error {
+	return nil
+}
+
+func (*recordingConn) LocalAddr() net.Addr {
+	return testAddr("local")
+}
+
+func (*recordingConn) RemoteAddr() net.Addr {
+	return testAddr("remote")
+}
+
+func (*recordingConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+func (c *recordingConn) SetReadDeadline(t time.Time) error {
+	c.readDeadline = t
+	return nil
+}
+
+func (c *recordingConn) SetWriteDeadline(t time.Time) error {
+	c.writeDeadline = t
+	return nil
+}
+
+type testAddr string
+
+func (a testAddr) Network() string {
+	return string(a)
+}
+
+func (a testAddr) String() string {
+	return string(a)
 }
 
 func newJSONRequest(t *testing.T, body string) *http.Request {

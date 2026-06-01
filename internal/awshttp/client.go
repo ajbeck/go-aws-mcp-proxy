@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -62,6 +63,9 @@ func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client) (
 		client = *base
 	}
 	client.Transport = transport
+	if cfg.Timeout > 0 {
+		client.Timeout = cfg.Timeout
+	}
 	return &client, nil
 }
 
@@ -72,6 +76,12 @@ func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTr
 
 	var caBundle []byte
 	var err error
+	if hasTransportTimeouts(cfg) {
+		base, err = transportWithTimeouts(base, cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if cfg.CaBundle != "" {
 		caBundle, err = readCABundle(cfg.CaBundle)
 		if err != nil {
@@ -124,6 +134,62 @@ func baseTransport(client *http.Client) http.RoundTripper {
 	return http.DefaultTransport
 }
 
+func hasTransportTimeouts(cfg proxyconfig.Config) bool {
+	return cfg.ConnectTimeout > 0 || cfg.ReadTimeout > 0 || cfg.WriteTimeout > 0
+}
+
+func transportWithTimeouts(base http.RoundTripper, cfg proxyconfig.Config) (http.RoundTripper, error) {
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return nil, fmt.Errorf("timeouts require an *http.Transport base, got %T", base)
+	}
+
+	cloned := transport.Clone()
+	if cfg.ConnectTimeout > 0 {
+		cloned.TLSHandshakeTimeout = cfg.ConnectTimeout
+	}
+	if cfg.ReadTimeout > 0 {
+		cloned.ResponseHeaderTimeout = cfg.ReadTimeout
+	}
+	if cfg.WriteTimeout > 0 {
+		cloned.ExpectContinueTimeout = cfg.WriteTimeout
+	}
+	cloned.DialContext = timeoutDialContext(cloned.DialContext, cfg)
+	if cloned.DialTLSContext != nil {
+		cloned.DialTLSContext = timeoutDialContext(cloned.DialTLSContext, cfg)
+	}
+
+	return cloned, nil
+}
+
+func timeoutDialContext(dial func(context.Context, string, string) (net.Conn, error), cfg proxyconfig.Config) func(context.Context, string, string) (net.Conn, error) {
+	if dial == nil {
+		dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
+		dial = dialer.DialContext
+	}
+
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if cfg.ConnectTimeout > 0 {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, cfg.ConnectTimeout)
+			defer cancel()
+		}
+
+		conn, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if cfg.ReadTimeout <= 0 && cfg.WriteTimeout <= 0 {
+			return conn, nil
+		}
+		return &deadlineConn{
+			Conn:         conn,
+			readTimeout:  cfg.ReadTimeout,
+			writeTimeout: cfg.WriteTimeout,
+		}, nil
+	}
+}
+
 func readCABundle(path string) ([]byte, error) {
 	bundle, err := os.ReadFile(path)
 	if err != nil {
@@ -158,6 +224,26 @@ func transportWithCABundle(base http.RoundTripper, path string, bundle []byte) (
 	cloned.TLSClientConfig = tlsConfig
 
 	return cloned, nil
+}
+
+type deadlineConn struct {
+	net.Conn
+	readTimeout  time.Duration
+	writeTimeout time.Duration
+}
+
+func (c *deadlineConn) Read(b []byte) (int, error) {
+	if c.readTimeout > 0 {
+		_ = c.Conn.SetReadDeadline(time.Now().Add(c.readTimeout))
+	}
+	return c.Conn.Read(b)
+}
+
+func (c *deadlineConn) Write(b []byte) (int, error) {
+	if c.writeTimeout > 0 {
+		_ = c.Conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	}
+	return c.Conn.Write(b)
 }
 
 func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
