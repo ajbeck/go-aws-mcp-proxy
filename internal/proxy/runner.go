@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -38,11 +39,14 @@ type Runner struct {
 	Version   string
 }
 
-func (r Runner) RunProxy(ctx context.Context, cfg proxyconfig.Config) error {
+func (r Runner) RunProxy(ctx context.Context, cfg proxyconfig.Config, logger *slog.Logger) error {
+	if r.Logger != nil {
+		logger = r.Logger
+	}
 	runtime := Runtime{
 		config:    cfg,
 		connector: r.Connector,
-		logger:    r.Logger,
+		logger:    logger,
 		transport: r.Transport,
 		version:   r.Version,
 	}
@@ -142,6 +146,9 @@ func (r *Runtime) registerUpstreamTools(ctx context.Context, upstream UpstreamSe
 	for _, tool := range filterTools(result.Tools, r.config.ReadOnly) {
 		r.registerTool(tool, upstream)
 	}
+	if r.logger != nil {
+		r.logger.Info("registered upstream tools", "count", len(result.Tools), "read_only", r.config.ReadOnly)
+	}
 	return nil
 }
 
@@ -157,6 +164,7 @@ func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 	}
 
 	r.server.AddTool(localTool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		start := time.Now()
 		callCtx := ctx
 		cancel := func() {}
 		if r.config.ToolTimeout > 0 {
@@ -169,7 +177,13 @@ func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 			Arguments: rawArguments(req.Params.Arguments),
 		})
 		if err != nil {
+			if r.logger != nil {
+				r.logger.Error("upstream tool call failed", "tool", req.Params.Name, "duration_ms", time.Since(start).Milliseconds(), "error", err)
+			}
 			return toolErrorResult(req.Params.Name, err), nil
+		}
+		if r.logger != nil {
+			r.logger.Debug("upstream tool call completed", "tool", req.Params.Name, "duration_ms", time.Since(start).Milliseconds(), "is_error", result != nil && result.IsError)
 		}
 		return result, nil
 	})
@@ -178,7 +192,7 @@ func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 func (r *Runtime) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
 	connector := r.connector
 	if connector == nil {
-		connector = MCPUpstreamConnector{Version: r.version}
+		connector = MCPUpstreamConnector{Logger: r.logger, Version: r.version}
 	}
 
 	session, err := connector.Connect(ctx, r.config, params)
@@ -265,6 +279,7 @@ func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
 
 type MCPUpstreamConnector struct {
 	HTTPClient *http.Client
+	Logger     *slog.Logger
 	Version    string
 }
 
@@ -273,7 +288,7 @@ func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg proxyconfig.Confi
 	if version == "" {
 		version = "dev"
 	}
-	httpClient, err := awshttp.NewClient(ctx, cfg, c.HTTPClient)
+	httpClient, err := awshttp.NewClient(ctx, cfg, c.HTTPClient, c.Logger)
 	if err != nil {
 		return nil, err
 	}

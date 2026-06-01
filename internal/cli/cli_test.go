@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -13,11 +14,13 @@ import (
 type fakeRunner struct {
 	called bool
 	config proxyconfig.Config
+	logger *slog.Logger
 }
 
-func (r *fakeRunner) RunProxy(_ context.Context, config proxyconfig.Config) error {
+func (r *fakeRunner) RunProxy(_ context.Context, config proxyconfig.Config, logger *slog.Logger) error {
 	r.called = true
 	r.config = config
+	r.logger = logger
 	return nil
 }
 
@@ -54,6 +57,9 @@ func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
 	if !runner.called {
 		t.Fatal("runner was not called")
 	}
+	if runner.logger == nil {
+		t.Fatal("logger was not passed to runner")
+	}
 
 	cfg := runner.config
 	if cfg.Endpoint != "https://bedrock-agentcore.us-east-1.amazonaws.com/mcp" {
@@ -89,6 +95,33 @@ func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
 	}
 	if !cfg.DisableTelemetry || !cfg.SkipAuth {
 		t.Fatalf("expected disable telemetry and skip auth: %+v", cfg)
+	}
+}
+
+func TestLoggerHonorsLogLevelAndWritesToStderr(t *testing.T) {
+	runner := &fakeRunner{}
+	var stdout, stderr bytes.Buffer
+
+	code := Run(context.Background(), []string{
+		"https://service.us-east-1.api.aws/mcp",
+		"--log-level", "DEBUG",
+	}, Options{
+		Env:     proxyconfig.MapEnv{},
+		Runner:  runner,
+		Stderr:  &stderr,
+		Stdout:  &stdout,
+		Version: "test",
+	})
+	if code != exitOK {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+
+	runner.logger.Debug("debug message")
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "debug message") {
+		t.Fatalf("stderr = %q, want debug log", stderr.String())
 	}
 }
 

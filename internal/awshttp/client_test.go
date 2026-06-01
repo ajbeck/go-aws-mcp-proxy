@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -253,6 +255,65 @@ func TestNewClientAppliesTimeouts(t *testing.T) {
 	}
 }
 
+func TestTransportRetriesTransientHTTPStatus(t *testing.T) {
+	base := &sequenceRoundTripper{
+		responses: []*http.Response{
+			responseWithStatus(http.StatusServiceUnavailable),
+			responseWithStatus(http.StatusOK),
+		},
+	}
+	var logs bytes.Buffer
+	transport := &Transport{
+		Base:       base,
+		Logger:     slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		Retries:    1,
+		RetryDelay: func(int) time.Duration { return 0 },
+		SkipAuth:   true,
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("StatusCode = %d", resp.StatusCode)
+	}
+	if base.calls != 2 {
+		t.Fatalf("calls = %d, want 2", base.calls)
+	}
+	if !strings.Contains(logs.String(), "retrying upstream HTTP request") {
+		t.Fatalf("logs = %q, want retry log", logs.String())
+	}
+}
+
+func TestTransportLogsRedactedHeaders(t *testing.T) {
+	base := &sequenceRoundTripper{responses: []*http.Response{responseWithStatus(http.StatusOK)}}
+	var logs bytes.Buffer
+	transport := &Transport{
+		Base:     base,
+		Logger:   slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		SkipAuth: true,
+	}
+
+	req := newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	req.Header.Set("Authorization", "secret")
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	resp.Body.Close()
+
+	logText := logs.String()
+	if !strings.Contains(logText, "[REDACTED]") {
+		t.Fatalf("logs = %q, want redacted header", logText)
+	}
+	if strings.Contains(logText, "secret") {
+		t.Fatalf("logs = %q, leaked secret", logText)
+	}
+}
+
 func TestDeadlineConnAppliesReadAndWriteDeadlines(t *testing.T) {
 	inner := &recordingConn{}
 	conn := &deadlineConn{
@@ -291,6 +352,34 @@ func TestRedactHeader(t *testing.T) {
 type recordingConn struct {
 	readDeadline  time.Time
 	writeDeadline time.Time
+}
+
+type sequenceRoundTripper struct {
+	calls     int
+	responses []*http.Response
+	errs      []error
+}
+
+func (rt *sequenceRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	rt.calls++
+	index := rt.calls - 1
+	if index < len(rt.errs) && rt.errs[index] != nil {
+		return nil, rt.errs[index]
+	}
+	if index < len(rt.responses) {
+		resp := rt.responses[index]
+		resp.Request = req
+		return resp, nil
+	}
+	return responseWithStatus(http.StatusOK), nil
+}
+
+func responseWithStatus(status int) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Body:       io.NopCloser(bytes.NewReader([]byte("{}"))),
+		Header:     make(http.Header),
+	}
 }
 
 func (*recordingConn) Read([]byte) (int, error) {
