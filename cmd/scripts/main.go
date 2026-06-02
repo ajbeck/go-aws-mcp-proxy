@@ -204,6 +204,7 @@ func build(args []string, stdout, stderr io.Writer) error {
 	goos := flags.String("goos", runtime.GOOS, "target GOOS")
 	goarch := flags.String("goarch", runtime.GOARCH, "target GOARCH")
 	output := flags.String("output", defaultBuildOutput(runtime.GOOS), "binary output path")
+	version := flags.String("version", "dev", "version to embed in the binary")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -220,7 +221,8 @@ func build(args []string, stdout, stderr io.Writer) error {
 	}
 
 	env := append(os.Environ(), "GOOS="+*goos, "GOARCH="+*goarch)
-	return runCommandEnv(stdout, stderr, env, "go", "build", "-o", *output, appPackage)
+	ldflags := "-X main.version=" + *version
+	return runCommandEnv(stdout, stderr, env, "go", "build", "-ldflags", ldflags, "-o", *output, appPackage)
 }
 
 func ci(stdout, stderr io.Writer) error {
