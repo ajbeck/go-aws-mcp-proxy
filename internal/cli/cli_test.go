@@ -8,16 +8,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxyconfig"
+	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxy"
 )
 
 type fakeRunner struct {
 	called bool
-	config proxyconfig.Config
+	config proxy.Config
 	logger *slog.Logger
 }
 
-func (r *fakeRunner) RunProxy(_ context.Context, config proxyconfig.Config, logger *slog.Logger) error {
+func (r *fakeRunner) RunProxy(_ context.Context, config proxy.Config, logger *slog.Logger) error {
 	r.called = true
 	r.config = config
 	r.logger = logger
@@ -28,11 +28,13 @@ func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
 	runner := &fakeRunner{}
 	var stdout, stderr bytes.Buffer
 
-	code := Run(context.Background(), []string{
+	code := Run(t.Context(), []string{
 		"https://bedrock-agentcore.us-east-1.amazonaws.com/mcp",
-		"--profile", "default", "dev",
+		"--profile", "default",
+		"--profile", "dev",
 		"--ca-bundle", "/tmp/company-ca.pem",
-		"--metadata", "team=platform", "AWS_REGION=us-west-2",
+		"--metadata", "team=platform",
+		"--metadata", "AWS_REGION=us-west-2",
 		"--read-only",
 		"--log-level", "DEBUG",
 		"--retries", "3",
@@ -44,7 +46,6 @@ func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
 		"--disable-telemetry",
 		"--skip-auth",
 	}, Options{
-		Env:     proxyconfig.MapEnv{},
 		Runner:  runner,
 		Stderr:  &stderr,
 		Stdout:  &stdout,
@@ -102,11 +103,10 @@ func TestLoggerHonorsLogLevelAndWritesToStderr(t *testing.T) {
 	runner := &fakeRunner{}
 	var stdout, stderr bytes.Buffer
 
-	code := Run(context.Background(), []string{
+	code := Run(t.Context(), []string{
 		"https://service.us-east-1.api.aws/mcp",
 		"--log-level", "DEBUG",
 	}, Options{
-		Env:     proxyconfig.MapEnv{},
 		Runner:  runner,
 		Stderr:  &stderr,
 		Stdout:  &stdout,
@@ -126,12 +126,9 @@ func TestLoggerHonorsLogLevelAndWritesToStderr(t *testing.T) {
 }
 
 func TestRunUsesVersionFlag(t *testing.T) {
-	runner := &fakeRunner{}
 	var stdout, stderr bytes.Buffer
 
-	code := Run(context.Background(), []string{"--version"}, Options{
-		Env:     proxyconfig.MapEnv{},
-		Runner:  runner,
+	code := Run(t.Context(), []string{"--version"}, Options{
 		Stderr:  &stderr,
 		Stdout:  &stdout,
 		Version: "1.2.3",
@@ -140,19 +137,32 @@ func TestRunUsesVersionFlag(t *testing.T) {
 	if code != exitOK {
 		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if runner.called {
-		t.Fatal("runner should not be called for --version")
-	}
 	if strings.TrimSpace(stdout.String()) != "1.2.3" {
 		t.Fatalf("stdout = %q", stdout.String())
+	}
+}
+
+func TestRunRequiresRunner(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+
+	code := Run(t.Context(), []string{"https://service.us-east-1.api.aws/mcp"}, Options{
+		Stderr:  &stderr,
+		Stdout:  &stdout,
+		Version: "test",
+	})
+
+	if code != exitError {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "runner is required") {
+		t.Fatalf("stderr = %q, want runner error", stderr.String())
 	}
 }
 
 func TestRunReturnsUsageForParseErrors(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
-	code := Run(context.Background(), []string{"--profile"}, Options{
-		Env:     proxyconfig.MapEnv{},
+	code := Run(t.Context(), []string{"--profile"}, Options{
 		Runner:  &fakeRunner{},
 		Stderr:  &stderr,
 		Stdout:  &stdout,
@@ -167,47 +177,63 @@ func TestRunReturnsUsageForParseErrors(t *testing.T) {
 	}
 }
 
-func TestRunReturnsUsageForConfigValidationErrors(t *testing.T) {
-	tests := []struct {
-		name string
-		args []string
-		want string
-	}{
-		{
-			name: "metadata",
-			args: []string{"https://service.us-east-1.api.aws/mcp", "--metadata", "invalid"},
-			want: "metadata must be in key=value format",
+func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
+	cfg := app{
+		Endpoint: "https://service.example.com/mcp",
+		Metadata: map[string]string{
+			"team": "platform",
 		},
-		{
-			name: "retries",
-			args: []string{"https://service.us-east-1.api.aws/mcp", "--retries", "11"},
-			want: "retries must be between 0 and 10",
-		},
-		{
-			name: "negative timeout",
-			args: []string{"https://service.us-east-1.api.aws/mcp", "--timeout", "-1"},
-			want: "timeout must be >= 0",
-		},
+	}.config(lookupEnv(map[string]string{"AWS_REGION": "eu-west-1"}))
+
+	if cfg.Service != "service" {
+		t.Fatalf("Service = %q", cfg.Service)
 	}
+	if cfg.Region != "eu-west-1" {
+		t.Fatalf("Region = %q", cfg.Region)
+	}
+	if cfg.Metadata["AWS_REGION"] != "eu-west-1" {
+		t.Fatalf("Metadata AWS_REGION = %q", cfg.Metadata["AWS_REGION"])
+	}
+	if cfg.Metadata["team"] != "platform" {
+		t.Fatalf("Metadata team = %q", cfg.Metadata["team"])
+	}
+}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var stdout, stderr bytes.Buffer
+func TestAppConfigPreservesExplicitMetadataRegion(t *testing.T) {
+	cfg := app{
+		Endpoint: "https://service.us-east-1.api.aws/mcp",
+		Metadata: map[string]string{
+			"AWS_REGION": "us-west-2",
+		},
+	}.config(lookupEnv(nil))
 
-			code := Run(context.Background(), tt.args, Options{
-				Env:     proxyconfig.MapEnv{},
-				Runner:  &fakeRunner{},
-				Stderr:  &stderr,
-				Stdout:  &stdout,
-				Version: "test",
-			})
+	if cfg.Region != "us-east-1" {
+		t.Fatalf("Region = %q", cfg.Region)
+	}
+	if cfg.Metadata["AWS_REGION"] != "us-west-2" {
+		t.Fatalf("Metadata AWS_REGION = %q", cfg.Metadata["AWS_REGION"])
+	}
+}
 
-			if code != exitUsage {
-				t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
-			}
-			if !strings.Contains(stderr.String(), tt.want) {
-				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.want)
-			}
-		})
+func TestAppConfigDedupesProfiles(t *testing.T) {
+	cfg := app{
+		Endpoint: "https://service.us-east-1.api.aws/mcp",
+		Profiles: []string{
+			"default",
+			"dev",
+			"default",
+			"",
+		},
+	}.config(lookupEnv(nil))
+
+	if got := strings.Join(cfg.Profiles, ","); got != "default,dev" {
+		t.Fatalf("Profiles = %q", got)
+	}
+}
+
+func lookupEnv(values map[string]string) proxy.LookupEnv {
+	return func(name string) (string, bool) {
+		value, ok := values[name]
+		return value, ok
 	}
 }

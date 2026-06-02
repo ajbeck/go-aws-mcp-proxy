@@ -10,9 +10,6 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/awshttp"
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxyconfig"
 )
 
 const (
@@ -22,7 +19,7 @@ const (
 )
 
 type UpstreamConnector interface {
-	Connect(context.Context, proxyconfig.Config, *mcp.InitializeParams) (UpstreamSession, error)
+	Connect(context.Context, Config, *mcp.InitializeParams) (UpstreamSession, error)
 }
 
 type UpstreamSession interface {
@@ -39,7 +36,7 @@ type Runner struct {
 	Version   string
 }
 
-func (r Runner) RunProxy(ctx context.Context, cfg proxyconfig.Config, logger *slog.Logger) error {
+func (r Runner) RunProxy(ctx context.Context, cfg Config, logger *slog.Logger) error {
 	if r.Logger != nil {
 		logger = r.Logger
 	}
@@ -54,7 +51,7 @@ func (r Runner) RunProxy(ctx context.Context, cfg proxyconfig.Config, logger *sl
 }
 
 type Runtime struct {
-	config    proxyconfig.Config
+	config    Config
 	connector UpstreamConnector
 	logger    *slog.Logger
 	transport mcp.Transport
@@ -439,12 +436,12 @@ type MCPUpstreamConnector struct {
 	Version    string
 }
 
-func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg proxyconfig.Config, params *mcp.InitializeParams) (UpstreamSession, error) {
+func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg Config, params *mcp.InitializeParams) (UpstreamSession, error) {
 	version := c.Version
 	if version == "" {
 		version = "dev"
 	}
-	options := awshttp.ClientOptions{
+	options := ClientOptions{
 		Logger:  c.Logger,
 		Version: version,
 	}
@@ -452,7 +449,7 @@ func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg proxyconfig.Confi
 		options.ClientName = params.ClientInfo.Name
 		options.ClientVersion = params.ClientInfo.Version
 	}
-	httpClient, err := awshttp.NewClientWithOptions(ctx, cfg, c.HTTPClient, options)
+	httpClient, err := NewClientWithOptions(ctx, cfg.httpConfig(), c.HTTPClient, options)
 	if err != nil {
 		return nil, err
 	}

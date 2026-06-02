@@ -9,21 +9,19 @@ import (
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxyconfig"
 )
 
 type fakeConnector struct {
 	called            bool
-	cfg               proxyconfig.Config
-	configs           []proxyconfig.Config
+	cfg               Config
+	configs           []Config
 	params            *mcp.InitializeParams
 	err               error
 	sess              *fakeSession
 	sessionsByProfile map[string]*fakeSession
 }
 
-func (c *fakeConnector) Connect(_ context.Context, cfg proxyconfig.Config, params *mcp.InitializeParams) (UpstreamSession, error) {
+func (c *fakeConnector) Connect(_ context.Context, cfg Config, params *mcp.InitializeParams) (UpstreamSession, error) {
 	c.called = true
 	c.cfg = cfg
 	c.configs = append(c.configs, cfg)
@@ -100,7 +98,7 @@ func TestRuntimeConnectsUpstreamDuringInitialize(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
+		errs <- runner.RunProxy(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -175,7 +173,7 @@ func TestRuntimeRegistersAndForwardsUpstreamTools(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{
+		errs <- runner.RunProxy(ctx, Config{
 			Endpoint:    "https://service.us-east-1.api.aws/mcp",
 			ToolTimeout: 5 * time.Second,
 		}, nil)
@@ -246,7 +244,7 @@ func TestRuntimeInjectsAWSProfileIntoAuthToolSchema(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{
+		errs <- runner.RunProxy(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
 		}, nil)
@@ -308,7 +306,7 @@ func TestRuntimeRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{
+		errs <- runner.RunProxy(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
 		}, nil)
@@ -373,7 +371,7 @@ func TestRuntimeRoutesDefaultAWSProfileThroughDefaultSession(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{
+		errs <- runner.RunProxy(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
 		}, nil)
@@ -425,7 +423,7 @@ func TestRuntimeRejectsDisallowedAWSProfile(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{
+		errs <- runner.RunProxy(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
 		}, nil)
@@ -472,7 +470,7 @@ func TestRuntimeStripsAWSProfileFromNonAuthTool(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{
+		errs <- runner.RunProxy(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
 		}, nil)
@@ -543,7 +541,7 @@ func TestRuntimeFiltersReadOnlyTools(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{
+		errs <- runner.RunProxy(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			ReadOnly: true,
 		}, nil)
@@ -587,7 +585,7 @@ func TestRuntimeReturnsToolVisibleErrorOnUpstreamCallFailure(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
+		errs <- runner.RunProxy(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -637,7 +635,7 @@ func TestRuntimeAppliesToolTimeout(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{
+		errs <- runner.RunProxy(ctx, Config{
 			Endpoint:    "https://service.us-east-1.api.aws/mcp",
 			ToolTimeout: time.Millisecond,
 		}, nil)
@@ -682,7 +680,7 @@ func TestRuntimeReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, proxyconfig.Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
+		errs <- runner.RunProxy(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
