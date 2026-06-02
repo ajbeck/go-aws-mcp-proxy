@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/alecthomas/kong"
 
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxyconfig"
+	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxy"
 )
 
 const (
@@ -22,15 +23,15 @@ const (
 )
 
 type ProxyRunner interface {
-	RunProxy(context.Context, proxyconfig.Config, *slog.Logger) error
+	RunProxy(context.Context, proxy.Config, *slog.Logger) error
 }
 
 type Options struct {
-	Env     proxyconfig.Env
-	Runner  ProxyRunner
-	Stderr  io.Writer
-	Stdout  io.Writer
-	Version string
+	LookupEnv proxy.LookupEnv
+	Runner    ProxyRunner
+	Stderr    io.Writer
+	Stdout    io.Writer
+	Version   string
 }
 
 type app struct {
@@ -39,11 +40,11 @@ type app struct {
 	Endpoint string `arg:"" help:"SigV4 MCP endpoint URL."`
 
 	Service  string   `help:"AWS service name for SigV4 signing. Inferred from endpoint when omitted."`
-	Profiles []string `name:"profile" help:"AWS profile(s) to use. First profile is the default." sep:"none" placeholder:"PROFILE"`
+	Profiles []string `name:"profile" env:"AWS_MCP_PROXY_PROFILES,AWS_PROFILE" help:"AWS profile(s) to use. First profile is the default." sep:" " placeholder:"PROFILE"`
 	Region   string   `help:"AWS region to sign. Inferred from endpoint or AWS_REGION when omitted."`
-	CaBundle string   `name:"ca-bundle" help:"Path to a PEM certificate bundle to trust in addition to the system roots." placeholder:"PATH"`
+	CaBundle string   `name:"ca-bundle" env:"AWS_CA_BUNDLE" help:"Path to a PEM certificate bundle to trust in addition to the system roots." placeholder:"PATH"`
 
-	Metadata []string `help:"Metadata to inject into MCP requests as key=value pairs." sep:"none" placeholder:"KEY=VALUE"`
+	Metadata map[string]string `help:"Metadata to inject into MCP requests as key=value pairs." mapsep:"none" placeholder:"KEY=VALUE"`
 
 	ReadOnly bool `name:"read-only" help:"Disable tools that do not advertise readOnlyHint=true."`
 
@@ -79,17 +80,13 @@ func Run(ctx context.Context, args []string, options Options) int {
 			exitCode = code
 			exited = true
 		}),
-		kong.BindTo(ctx, (*context.Context)(nil)),
-		kong.BindTo(options.Env, (*proxyconfig.Env)(nil)),
-		kong.BindTo(options.Runner, (*ProxyRunner)(nil)),
-		kong.BindTo(options.Stderr, (*io.Writer)(nil)),
 	)
 	if err != nil {
 		fmt.Fprintln(options.Stderr, err)
 		return exitError
 	}
 
-	kctx, err := parser.Parse(normalizeMultiValueFlags(args))
+	_, err = parser.Parse(args)
 	if exited {
 		return exitCode
 	}
@@ -97,8 +94,13 @@ func Run(ctx context.Context, args []string, options Options) int {
 		fmt.Fprintln(options.Stderr, err)
 		return exitUsage
 	}
+	if options.Runner == nil {
+		fmt.Fprintln(options.Stderr, "runner is required")
+		return exitError
+	}
 
-	if err := kctx.Run(); err != nil {
+	cfg := application.config(options.LookupEnv)
+	if err := options.Runner.RunProxy(ctx, cfg, newLogger(cfg.LogLevel, options.Stderr)); err != nil {
 		fmt.Fprintln(options.Stderr, err)
 		return exitCodeForError(err)
 	}
@@ -111,19 +113,12 @@ func exitCodeForError(err error) int {
 	if errors.As(err, &parseErr) {
 		return exitUsage
 	}
-	var validationErr *proxyconfig.ValidationError
-	if errors.As(err, &validationErr) {
-		return exitUsage
-	}
 	return exitError
 }
 
 func (o Options) withDefaults() Options {
-	if o.Env == nil {
-		o.Env = proxyconfig.OSEnv{}
-	}
-	if o.Runner == nil {
-		o.Runner = notImplementedRunner{}
+	if o.LookupEnv == nil {
+		o.LookupEnv = os.LookupEnv
 	}
 	if o.Stderr == nil {
 		o.Stderr = os.Stderr
@@ -137,14 +132,34 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-func (a *app) Run(ctx context.Context, runner ProxyRunner, env proxyconfig.Env, stderr io.Writer) error {
-	cfg, err := proxyconfig.Resolve(proxyconfig.Input{
+func (a app) config(lookupEnv proxy.LookupEnv) proxy.Config {
+	if lookupEnv == nil {
+		lookupEnv = os.LookupEnv
+	}
+	endpointService, endpointRegion := serviceNameAndRegionFromEndpoint(a.Endpoint)
+	service := a.Service
+	if service == "" {
+		service = endpointService
+	}
+	region := a.Region
+	if region == "" {
+		region = endpointRegion
+	}
+	if region == "" {
+		region, _ = lookupEnv("AWS_REGION")
+	}
+	metadata := cloneMetadata(a.Metadata)
+	if _, ok := metadata["AWS_REGION"]; !ok && region != "" {
+		metadata["AWS_REGION"] = region
+	}
+
+	return proxy.Config{
 		Endpoint:         a.Endpoint,
-		Service:          a.Service,
-		Profiles:         a.Profiles,
-		Region:           a.Region,
+		Service:          service,
+		Profiles:         dedupe(a.Profiles),
+		Region:           region,
 		CaBundle:         a.CaBundle,
-		Metadata:         a.Metadata,
+		Metadata:         metadata,
 		ReadOnly:         a.ReadOnly,
 		LogLevel:         a.LogLevel,
 		Retries:          a.Retries,
@@ -155,43 +170,58 @@ func (a *app) Run(ctx context.Context, runner ProxyRunner, env proxyconfig.Env, 
 		ToolTimeout:      seconds(a.ToolTimeout),
 		DisableTelemetry: a.DisableTelemetry,
 		SkipAuth:         a.SkipAuth,
-	}, env)
-	if err != nil {
-		return err
 	}
-
-	return runner.RunProxy(ctx, cfg, newLogger(cfg.LogLevel, stderr))
 }
 
-func seconds(value float64) time.Duration {
-	return time.Duration(value * float64(time.Second))
-}
-
-func normalizeMultiValueFlags(args []string) []string {
-	var out []string
-	for i := 0; i < len(args); i++ {
-		arg := args[i]
-		if arg == "--profile" || arg == "--metadata" {
-			name := arg
-			start := len(out)
-			for i++; i < len(args) && !strings.HasPrefix(args[i], "-"); i++ {
-				out = append(out, name+"="+args[i])
-			}
-			i--
-			if len(out) == start && name == "--profile" {
-				out = append(out, name)
-			}
-			continue
-		}
-		out = append(out, arg)
+func cloneMetadata(metadata map[string]string) map[string]string {
+	out := make(map[string]string, len(metadata)+1)
+	for key, value := range metadata {
+		out[key] = value
 	}
 	return out
 }
 
-type notImplementedRunner struct{}
+func dedupe(values []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, value := range values {
+		if value == "" || seen[value] {
+			continue
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	return out
+}
 
-func (notImplementedRunner) RunProxy(context.Context, proxyconfig.Config, *slog.Logger) error {
-	return errors.New("proxy runtime is not implemented yet")
+func serviceNameAndRegionFromEndpoint(endpoint string) (string, string) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return "", ""
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return "", ""
+	}
+
+	parts := strings.Split(host, ".")
+	if len(parts) >= 4 {
+		tail := parts[len(parts)-4:]
+		if tail[0] == "bedrock-agentcore" && tail[2] == "amazonaws" && tail[3] == "com" {
+			return "bedrock-agentcore", tail[1]
+		}
+	}
+	if len(parts) == 4 && parts[2] == "api" && parts[3] == "aws" {
+		return parts[0], parts[1]
+	}
+	if parts[0] != "" {
+		return parts[0], ""
+	}
+	return "", ""
+}
+
+func seconds(value float64) time.Duration {
+	return time.Duration(value * float64(time.Second))
 }
 
 func newLogger(levelName string, w io.Writer) *slog.Logger {

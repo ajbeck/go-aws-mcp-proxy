@@ -14,6 +14,8 @@
 
 ## Coding Style & Naming
 
+- When using an external go module or package, always use the `scut gotools doc` command and review the exported interface. Always, deferr to using an "out of the box" feature before making a new one.
+
 ## Testing Guidelines
 
 ## Commit and PR Guidelines

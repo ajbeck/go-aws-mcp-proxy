@@ -1,4 +1,4 @@
-package awshttp
+package proxy
 
 import (
 	"bytes"
@@ -18,8 +18,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
-
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxyconfig"
 )
 
 type staticCredentials struct {
@@ -185,7 +183,7 @@ func TestNewClientTrustsCABundle(t *testing.T) {
 	bundlePath := filepath.Join(t.TempDir(), "ca.pem")
 	writeCertificateBundle(t, bundlePath, server.Certificate().Raw)
 
-	client, err := NewClient(context.Background(), proxyconfig.Config{
+	client, err := NewClient(context.Background(), httpConfig{
 		CaBundle: bundlePath,
 		SkipAuth: true,
 	}, nil)
@@ -209,7 +207,7 @@ func TestNewTransportRejectsInvalidCABundle(t *testing.T) {
 		t.Fatalf("write bundle: %v", err)
 	}
 
-	_, err := NewTransport(context.Background(), proxyconfig.Config{
+	_, err := NewTransport(context.Background(), httpConfig{
 		CaBundle: bundlePath,
 		SkipAuth: true,
 	}, http.DefaultTransport)
@@ -219,7 +217,7 @@ func TestNewTransportRejectsInvalidCABundle(t *testing.T) {
 }
 
 func TestNewClientAppliesTimeouts(t *testing.T) {
-	client, err := NewClient(context.Background(), proxyconfig.Config{
+	client, err := NewClient(context.Background(), httpConfig{
 		Timeout:        2 * time.Second,
 		ConnectTimeout: 3 * time.Second,
 		ReadTimeout:    4 * time.Second,
@@ -316,7 +314,7 @@ func TestTransportLogsRedactedHeaders(t *testing.T) {
 
 func TestTransportUserAgentIncludesClientInfoWhenTelemetryEnabled(t *testing.T) {
 	base := &captureRoundTripper{}
-	transport, err := NewTransportWithOptions(context.Background(), proxyconfig.Config{
+	transport, err := NewTransportWithOptions(context.Background(), httpConfig{
 		SkipAuth: true,
 	}, base, ClientOptions{
 		ClientName:    "My Client",
@@ -344,7 +342,7 @@ func TestTransportUserAgentIncludesClientInfoWhenTelemetryEnabled(t *testing.T) 
 
 func TestTransportUserAgentOmitsClientInfoWhenTelemetryDisabled(t *testing.T) {
 	base := &captureRoundTripper{}
-	transport, err := NewTransportWithOptions(context.Background(), proxyconfig.Config{
+	transport, err := NewTransportWithOptions(context.Background(), httpConfig{
 		DisableTelemetry: true,
 		SkipAuth:         true,
 	}, base, ClientOptions{

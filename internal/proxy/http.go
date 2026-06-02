@@ -1,4 +1,4 @@
-package awshttp
+package proxy
 
 import (
 	"bytes"
@@ -21,8 +21,6 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/config"
-
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxyconfig"
 )
 
 type CredentialsProvider interface {
@@ -59,7 +57,22 @@ type Transport struct {
 	UserAgent   string
 }
 
-func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client, loggers ...*slog.Logger) (*http.Client, error) {
+type httpConfig struct {
+	Service          string
+	Profile          string
+	Region           string
+	CaBundle         string
+	Metadata         map[string]string
+	Retries          int
+	Timeout          time.Duration
+	ConnectTimeout   time.Duration
+	ReadTimeout      time.Duration
+	WriteTimeout     time.Duration
+	DisableTelemetry bool
+	SkipAuth         bool
+}
+
+func NewClient(ctx context.Context, cfg httpConfig, base *http.Client, loggers ...*slog.Logger) (*http.Client, error) {
 	options := ClientOptions{Logger: firstLogger(loggers)}
 	transport, err := NewTransportWithOptions(ctx, cfg, baseTransport(base), options)
 	if err != nil {
@@ -77,7 +90,7 @@ func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client, l
 	return &client, nil
 }
 
-func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTripper, loggers ...*slog.Logger) (*Transport, error) {
+func NewTransport(ctx context.Context, cfg httpConfig, base http.RoundTripper, loggers ...*slog.Logger) (*Transport, error) {
 	return NewTransportWithOptions(ctx, cfg, base, ClientOptions{Logger: firstLogger(loggers)})
 }
 
@@ -88,7 +101,7 @@ type ClientOptions struct {
 	Version       string
 }
 
-func NewClientWithOptions(ctx context.Context, cfg proxyconfig.Config, base *http.Client, options ClientOptions) (*http.Client, error) {
+func NewClientWithOptions(ctx context.Context, cfg httpConfig, base *http.Client, options ClientOptions) (*http.Client, error) {
 	transport, err := NewTransportWithOptions(ctx, cfg, baseTransport(base), options)
 	if err != nil {
 		return nil, err
@@ -105,7 +118,7 @@ func NewClientWithOptions(ctx context.Context, cfg proxyconfig.Config, base *htt
 	return &client, nil
 }
 
-func NewTransportWithOptions(ctx context.Context, cfg proxyconfig.Config, base http.RoundTripper, options ClientOptions) (*Transport, error) {
+func NewTransportWithOptions(ctx context.Context, cfg httpConfig, base http.RoundTripper, options ClientOptions) (*Transport, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -144,7 +157,7 @@ func NewTransportWithOptions(ctx context.Context, cfg proxyconfig.Config, base h
 		Credentials: provider,
 		Logger:      options.Logger,
 		Metadata:    cfg.Metadata,
-		Profile:     firstProfile(cfg.Profiles),
+		Profile:     cfg.Profile,
 		Region:      cfg.Region,
 		Retries:     cfg.Retries,
 		Service:     cfg.Service,
@@ -159,13 +172,6 @@ func firstLogger(loggers []*slog.Logger) *slog.Logger {
 		return nil
 	}
 	return loggers[0]
-}
-
-func firstProfile(profiles []string) string {
-	if len(profiles) == 0 {
-		return ""
-	}
-	return profiles[0]
 }
 
 func userAgent(options ClientOptions, disableTelemetry bool) string {
@@ -197,12 +203,12 @@ func sanitizeUserAgentToken(value string) string {
 	return value
 }
 
-func loadAWSConfig(ctx context.Context, cfg proxyconfig.Config, caBundle []byte) (aws.Config, error) {
+func loadAWSConfig(ctx context.Context, cfg httpConfig, caBundle []byte) (aws.Config, error) {
 	options := []func(*config.LoadOptions) error{
 		config.WithRegion(cfg.Region),
 	}
-	if len(cfg.Profiles) > 0 {
-		options = append(options, config.WithSharedConfigProfile(cfg.Profiles[0]))
+	if cfg.Profile != "" {
+		options = append(options, config.WithSharedConfigProfile(cfg.Profile))
 	}
 	if len(caBundle) > 0 {
 		options = append(options, config.WithCustomCABundle(bytes.NewReader(caBundle)))
@@ -217,11 +223,11 @@ func baseTransport(client *http.Client) http.RoundTripper {
 	return http.DefaultTransport
 }
 
-func hasTransportTimeouts(cfg proxyconfig.Config) bool {
+func hasTransportTimeouts(cfg httpConfig) bool {
 	return cfg.ConnectTimeout > 0 || cfg.ReadTimeout > 0 || cfg.WriteTimeout > 0
 }
 
-func transportWithTimeouts(base http.RoundTripper, cfg proxyconfig.Config) (http.RoundTripper, error) {
+func transportWithTimeouts(base http.RoundTripper, cfg httpConfig) (http.RoundTripper, error) {
 	transport, ok := base.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("timeouts require an *http.Transport base, got %T", base)
@@ -245,7 +251,7 @@ func transportWithTimeouts(base http.RoundTripper, cfg proxyconfig.Config) (http
 	return cloned, nil
 }
 
-func timeoutDialContext(dial func(context.Context, string, string) (net.Conn, error), cfg proxyconfig.Config) func(context.Context, string, string) (net.Conn, error) {
+func timeoutDialContext(dial func(context.Context, string, string) (net.Conn, error), cfg httpConfig) func(context.Context, string, string) (net.Conn, error) {
 	if dial == nil {
 		dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
 		dial = dialer.DialContext
