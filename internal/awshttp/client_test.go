@@ -314,6 +314,63 @@ func TestTransportLogsRedactedHeaders(t *testing.T) {
 	}
 }
 
+func TestTransportUserAgentIncludesClientInfoWhenTelemetryEnabled(t *testing.T) {
+	base := &captureRoundTripper{}
+	transport, err := NewTransportWithOptions(context.Background(), proxyconfig.Config{
+		SkipAuth: true,
+	}, base, ClientOptions{
+		ClientName:    "My Client",
+		ClientVersion: "2.0",
+		Version:       "1.2.3",
+	})
+	if err != nil {
+		t.Fatalf("NewTransportWithOptions() error = %v", err)
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	resp.Body.Close()
+
+	userAgent := base.request.Header.Get("User-Agent")
+	if !strings.Contains(userAgent, "aws-mcp-proxy/1.2.3") {
+		t.Fatalf("User-Agent = %q, want proxy version", userAgent)
+	}
+	if !strings.Contains(userAgent, "my-client/2.0") {
+		t.Fatalf("User-Agent = %q, want client info", userAgent)
+	}
+}
+
+func TestTransportUserAgentOmitsClientInfoWhenTelemetryDisabled(t *testing.T) {
+	base := &captureRoundTripper{}
+	transport, err := NewTransportWithOptions(context.Background(), proxyconfig.Config{
+		DisableTelemetry: true,
+		SkipAuth:         true,
+	}, base, ClientOptions{
+		ClientName:    "My Client",
+		ClientVersion: "2.0",
+		Version:       "1.2.3",
+	})
+	if err != nil {
+		t.Fatalf("NewTransportWithOptions() error = %v", err)
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	resp.Body.Close()
+
+	userAgent := base.request.Header.Get("User-Agent")
+	if !strings.Contains(userAgent, "aws-mcp-proxy/1.2.3") {
+		t.Fatalf("User-Agent = %q, want proxy version", userAgent)
+	}
+	if strings.Contains(userAgent, "my-client") {
+		t.Fatalf("User-Agent = %q, leaked client info", userAgent)
+	}
+}
+
 func TestDeadlineConnAppliesReadAndWriteDeadlines(t *testing.T) {
 	inner := &recordingConn{}
 	conn := &deadlineConn{

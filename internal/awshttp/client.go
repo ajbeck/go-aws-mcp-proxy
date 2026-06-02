@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"strings"
 	"time"
 
@@ -55,10 +56,12 @@ type Transport struct {
 	Service     string
 	Signer      Signer
 	SkipAuth    bool
+	UserAgent   string
 }
 
 func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client, loggers ...*slog.Logger) (*http.Client, error) {
-	transport, err := NewTransport(ctx, cfg, baseTransport(base), loggers...)
+	options := ClientOptions{Logger: firstLogger(loggers)}
+	transport, err := NewTransportWithOptions(ctx, cfg, baseTransport(base), options)
 	if err != nil {
 		return nil, err
 	}
@@ -75,6 +78,34 @@ func NewClient(ctx context.Context, cfg proxyconfig.Config, base *http.Client, l
 }
 
 func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTripper, loggers ...*slog.Logger) (*Transport, error) {
+	return NewTransportWithOptions(ctx, cfg, base, ClientOptions{Logger: firstLogger(loggers)})
+}
+
+type ClientOptions struct {
+	ClientName    string
+	ClientVersion string
+	Logger        *slog.Logger
+	Version       string
+}
+
+func NewClientWithOptions(ctx context.Context, cfg proxyconfig.Config, base *http.Client, options ClientOptions) (*http.Client, error) {
+	transport, err := NewTransportWithOptions(ctx, cfg, baseTransport(base), options)
+	if err != nil {
+		return nil, err
+	}
+
+	client := *http.DefaultClient
+	if base != nil {
+		client = *base
+	}
+	client.Transport = transport
+	if cfg.Timeout > 0 {
+		client.Timeout = cfg.Timeout
+	}
+	return &client, nil
+}
+
+func NewTransportWithOptions(ctx context.Context, cfg proxyconfig.Config, base http.RoundTripper, options ClientOptions) (*Transport, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -111,7 +142,7 @@ func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTr
 		Base:        base,
 		Clock:       SystemClock{},
 		Credentials: provider,
-		Logger:      firstLogger(loggers),
+		Logger:      options.Logger,
 		Metadata:    cfg.Metadata,
 		Profile:     firstProfile(cfg.Profiles),
 		Region:      cfg.Region,
@@ -119,6 +150,7 @@ func NewTransport(ctx context.Context, cfg proxyconfig.Config, base http.RoundTr
 		Service:     cfg.Service,
 		Signer:      v4.NewSigner(),
 		SkipAuth:    cfg.SkipAuth,
+		UserAgent:   userAgent(options, cfg.DisableTelemetry),
 	}, nil
 }
 
@@ -134,6 +166,35 @@ func firstProfile(profiles []string) string {
 		return ""
 	}
 	return profiles[0]
+}
+
+func userAgent(options ClientOptions, disableTelemetry bool) string {
+	version := options.Version
+	if version == "" {
+		version = "dev"
+	}
+	agent := "go/" + runtime.Version() + " aws-mcp-proxy/" + sanitizeUserAgentToken(version)
+	if disableTelemetry || options.ClientName == "" || options.ClientVersion == "" {
+		return agent
+	}
+	return agent + " " + sanitizeClientName(options.ClientName) + "/" + sanitizeUserAgentToken(options.ClientVersion)
+}
+
+func sanitizeClientName(value string) string {
+	value = strings.ToLower(value)
+	value = strings.ReplaceAll(value, " ", "-")
+	value = strings.ReplaceAll(value, "/", "-")
+	return sanitizeUserAgentToken(value)
+}
+
+func sanitizeUserAgentToken(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	value = strings.ReplaceAll(value, " ", "-")
+	value = strings.ReplaceAll(value, "/", "-")
+	return value
 }
 
 func loadAWSConfig(ctx context.Context, cfg proxyconfig.Config, caBundle []byte) (aws.Config, error) {
@@ -284,6 +345,7 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	for attempt := 0; ; attempt++ {
 		attemptReq := req.Clone(req.Context())
 		setBody(attemptReq, body)
+		t.applyHeaders(attemptReq)
 
 		if !t.SkipAuth {
 			if t.Credentials == nil {
@@ -313,6 +375,12 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		if err := waitForRetry(req.Context(), t.retryDelay(attempt)); err != nil {
 			return nil, err
 		}
+	}
+}
+
+func (t *Transport) applyHeaders(req *http.Request) {
+	if t.UserAgent != "" && req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", t.UserAgent)
 	}
 }
 
