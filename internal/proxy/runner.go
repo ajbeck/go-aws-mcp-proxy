@@ -61,6 +61,7 @@ type Runtime struct {
 	version   string
 
 	server   *mcp.Server
+	profiles profileSessions
 	upstream upstreamState
 }
 
@@ -74,6 +75,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 		transport = &mcp.StdioTransport{}
 	}
 
+	defer r.profiles.Close()
 	defer r.upstream.Close()
 	return server.Run(ctx, transport)
 }
@@ -159,6 +161,9 @@ func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 
 	localTool := cloneTool(tool)
 	localTool.InputSchema = normalizedInputSchema(localTool.InputSchema)
+	if len(r.config.Profiles) > 0 && authRequiringTool(localTool.Name) {
+		localTool.InputSchema = inputSchemaWithProfile(localTool.InputSchema, r.config.Profiles)
+	}
 	if localTool.OutputSchema != nil && !schemaIsObject(localTool.OutputSchema) {
 		localTool.OutputSchema = nil
 	}
@@ -172,10 +177,7 @@ func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 		}
 		defer cancel()
 
-		result, err := upstream.CallTool(callCtx, &mcp.CallToolParams{
-			Name:      req.Params.Name,
-			Arguments: rawArguments(req.Params.Arguments),
-		})
+		result, err := r.callUpstreamTool(callCtx, upstream, req)
 		if err != nil {
 			if r.logger != nil {
 				r.logger.Error("upstream tool call failed", "tool", req.Params.Name, "duration_ms", time.Since(start).Milliseconds(), "error", err)
@@ -189,6 +191,51 @@ func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 	})
 }
 
+func (r *Runtime) callUpstreamTool(ctx context.Context, upstream UpstreamSession, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args, profile, err := argumentsAndProfile(req.Params.Arguments)
+	if err != nil {
+		return nil, err
+	}
+	if profile == "" {
+		return upstream.CallTool(ctx, &mcp.CallToolParams{
+			Name:      req.Params.Name,
+			Arguments: rawArguments(req.Params.Arguments),
+		})
+	}
+
+	if !authRequiringTool(req.Params.Name) {
+		if r.logger != nil {
+			r.logger.Warn("ignoring aws_profile on non-auth tool", "tool", req.Params.Name)
+		}
+		return upstream.CallTool(ctx, &mcp.CallToolParams{
+			Name:      req.Params.Name,
+			Arguments: args,
+		})
+	}
+
+	if !allowedProfile(profile, r.config.Profiles) {
+		return nil, fmt.Errorf("profile %q is not in the allowed list; allowed profiles: %s", profile, profileList(r.config.Profiles))
+	}
+	if profile == defaultProfile(r.config.Profiles) {
+		return upstream.CallTool(ctx, &mcp.CallToolParams{
+			Name:      req.Params.Name,
+			Arguments: args,
+		})
+	}
+
+	session, err := r.profiles.Get(ctx, profile, r)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create connection for profile %q; check that the profile is configured and credentials are valid: %w", profile, err)
+	}
+	if r.logger != nil {
+		r.logger.Info("routing tool call through profile override", "tool", req.Params.Name, "profile", profile)
+	}
+	return session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      req.Params.Name,
+		Arguments: args,
+	})
+}
+
 func (r *Runtime) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
 	connector := r.connector
 	if connector == nil {
@@ -199,6 +246,7 @@ func (r *Runtime) connectUpstream(ctx context.Context, params *mcp.InitializePar
 	if err != nil {
 		return nil, err
 	}
+	r.profiles.SetInitializeParams(params)
 	r.upstream.Set(session, params.ClientInfo)
 	return session, nil
 }
@@ -266,6 +314,114 @@ func rawArguments(arguments json.RawMessage) any {
 		return map[string]any{}
 	}
 	return arguments
+}
+
+var authRequiringTools = map[string]bool{
+	"aws___call_aws":             true,
+	"aws___run_script":           true,
+	"aws___get_presigned_url":    true,
+	"aws___get_tasks":            true,
+	"aws___suggest_aws_commands": true,
+}
+
+func authRequiringTool(name string) bool {
+	return authRequiringTools[name]
+}
+
+func inputSchemaWithProfile(schema any, profiles []string) any {
+	object := schemaObject(schema)
+	properties, _ := object["properties"].(map[string]any)
+	if properties == nil {
+		properties = map[string]any{}
+		object["properties"] = properties
+	}
+	properties["aws_profile"] = map[string]any{
+		"type":        "string",
+		"description": "AWS CLI profile to sign this request with. Available profiles: " + profileList(profiles) + ".",
+		"enum":        append([]string(nil), profiles...),
+	}
+	return object
+}
+
+func schemaObject(schema any) map[string]any {
+	switch value := schema.(type) {
+	case map[string]any:
+		return deepCopyMap(value)
+	case json.RawMessage:
+		var decoded map[string]any
+		if err := json.Unmarshal(value, &decoded); err == nil && decoded != nil {
+			return decoded
+		}
+	case []byte:
+		var decoded map[string]any
+		if err := json.Unmarshal(value, &decoded); err == nil && decoded != nil {
+			return decoded
+		}
+	}
+	return map[string]any{"type": "object"}
+}
+
+func deepCopyMap(value map[string]any) map[string]any {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return map[string]any{"type": "object"}
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		return map[string]any{"type": "object"}
+	}
+	return decoded
+}
+
+func argumentsAndProfile(arguments json.RawMessage) (any, string, error) {
+	if len(arguments) == 0 {
+		return map[string]any{}, "", nil
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(arguments, &decoded); err != nil {
+		return arguments, "", nil
+	}
+	value, ok := decoded["aws_profile"]
+	if !ok {
+		return arguments, "", nil
+	}
+	profile, ok := value.(string)
+	if !ok || profile == "" {
+		return nil, "", fmt.Errorf("aws_profile must be a non-empty string")
+	}
+	delete(decoded, "aws_profile")
+	encoded, err := json.Marshal(decoded)
+	if err != nil {
+		return nil, "", err
+	}
+	return json.RawMessage(encoded), profile, nil
+}
+
+func allowedProfile(profile string, profiles []string) bool {
+	for _, allowed := range profiles {
+		if profile == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func defaultProfile(profiles []string) string {
+	if len(profiles) == 0 {
+		return ""
+	}
+	return profiles[0]
+}
+
+func profileList(profiles []string) string {
+	if len(profiles) == 0 {
+		return ""
+	}
+	out := profiles[0]
+	for _, profile := range profiles[1:] {
+		out += ", " + profile
+	}
+	return out
 }
 
 func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
@@ -338,4 +494,60 @@ func (s *upstreamState) Close() error {
 		return nil
 	}
 	return session.Close()
+}
+
+type profileSessions struct {
+	mu     sync.Mutex
+	params *mcp.InitializeParams
+	cache  map[string]UpstreamSession
+}
+
+func (s *profileSessions) SetInitializeParams(params *mcp.InitializeParams) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.params = params
+}
+
+func (s *profileSessions) Get(ctx context.Context, profile string, runtime *Runtime) (UpstreamSession, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.cache != nil {
+		if session := s.cache[profile]; session != nil {
+			return session, nil
+		}
+	}
+	params := s.params
+
+	cfg := runtime.config
+	cfg.Profiles = []string{profile}
+	connector := runtime.connector
+	if connector == nil {
+		connector = MCPUpstreamConnector{Logger: runtime.logger, Version: runtime.version}
+	}
+
+	session, err := connector.Connect(ctx, cfg, params)
+	if err != nil {
+		return nil, err
+	}
+
+	if s.cache == nil {
+		s.cache = map[string]UpstreamSession{}
+	}
+	s.cache[profile] = session
+	return session, nil
+}
+
+func (s *profileSessions) Close() error {
+	s.mu.Lock()
+	cache := s.cache
+	s.cache = nil
+	s.mu.Unlock()
+
+	var firstErr error
+	for _, session := range cache {
+		if err := session.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
 }
