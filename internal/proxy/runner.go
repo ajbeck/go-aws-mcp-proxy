@@ -439,12 +439,20 @@ type MCPUpstreamConnector struct {
 	Version    string
 }
 
-func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg proxyconfig.Config, _ *mcp.InitializeParams) (UpstreamSession, error) {
+func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg proxyconfig.Config, params *mcp.InitializeParams) (UpstreamSession, error) {
 	version := c.Version
 	if version == "" {
 		version = "dev"
 	}
-	httpClient, err := awshttp.NewClient(ctx, cfg, c.HTTPClient, c.Logger)
+	options := awshttp.ClientOptions{
+		Logger:  c.Logger,
+		Version: version,
+	}
+	if params != nil && params.ClientInfo != nil {
+		options.ClientName = params.ClientInfo.Name
+		options.ClientVersion = params.ClientInfo.Version
+	}
+	httpClient, err := awshttp.NewClientWithOptions(ctx, cfg, c.HTTPClient, options)
 	if err != nil {
 		return nil, err
 	}
