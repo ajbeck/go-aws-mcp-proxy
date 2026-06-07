@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxy"
+	"github.com/ajbeck/go-aws-mcp-proxy/proxy"
 )
 
 type fakeProxyRun struct {
@@ -211,7 +211,7 @@ func TestAppConfigDedupesProfiles(t *testing.T) {
 	}
 }
 
-func lookupEnv(values map[string]string) proxy.LookupEnv {
+func lookupEnv(values map[string]string) LookupEnv {
 	return func(name string) (string, bool) {
 		value, ok := values[name]
 		return value, ok

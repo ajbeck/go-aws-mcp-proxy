@@ -81,7 +81,7 @@ func TestTransportInjectsMetadataBeforeSigning(t *testing.T) {
 		Source:          "test",
 	}}
 	signer := &recordingSigner{}
-	transport := &Transport{
+	transport := &transport{
 		Base:        base,
 		Clock:       fixedClock{},
 		Credentials: creds,
@@ -132,7 +132,7 @@ func TestTransportSkipAuthStillInjectsMetadata(t *testing.T) {
 	base := &captureRoundTripper{}
 	creds := &staticCredentials{}
 	signer := &recordingSigner{}
-	transport := &Transport{
+	transport := &transport{
 		Base:        base,
 		Credentials: creds,
 		Metadata:    map[string]string{"AWS_REGION": "us-east-1"},
@@ -174,7 +174,7 @@ func TestInjectMetadataLeavesNonJSONRPCBodyUnchanged(t *testing.T) {
 	}
 }
 
-func TestNewClientTrustsCABundle(t *testing.T) {
+func TestNewHTTPClientTrustsCABundle(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	}))
@@ -183,12 +183,12 @@ func TestNewClientTrustsCABundle(t *testing.T) {
 	bundlePath := filepath.Join(t.TempDir(), "ca.pem")
 	writeCertificateBundle(t, bundlePath, server.Certificate().Raw)
 
-	client, err := NewClient(context.Background(), httpConfig{
+	client, err := newClient(context.Background(), httpConfig{
 		CaBundle: bundlePath,
 		SkipAuth: true,
 	}, nil)
 	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+		t.Fatalf("newClient() error = %v", err)
 	}
 
 	resp, err := client.Get(server.URL)
@@ -201,23 +201,23 @@ func TestNewClientTrustsCABundle(t *testing.T) {
 	}
 }
 
-func TestNewTransportRejectsInvalidCABundle(t *testing.T) {
+func TestNewHTTPTransportRejectsInvalidCABundle(t *testing.T) {
 	bundlePath := filepath.Join(t.TempDir(), "invalid.pem")
 	if err := os.WriteFile(bundlePath, []byte("not a certificate"), 0o600); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
 
-	_, err := NewTransport(context.Background(), httpConfig{
+	_, err := newTransport(context.Background(), httpConfig{
 		CaBundle: bundlePath,
 		SkipAuth: true,
 	}, http.DefaultTransport)
 	if err == nil {
-		t.Fatal("NewTransport() error = nil")
+		t.Fatal("newTransport() error = nil")
 	}
 }
 
-func TestNewClientAppliesTimeouts(t *testing.T) {
-	client, err := NewClient(context.Background(), httpConfig{
+func TestNewHTTPClientAppliesTimeouts(t *testing.T) {
+	client, err := newClient(context.Background(), httpConfig{
 		Timeout:        2 * time.Second,
 		ConnectTimeout: 3 * time.Second,
 		ReadTimeout:    4 * time.Second,
@@ -225,13 +225,13 @@ func TestNewClientAppliesTimeouts(t *testing.T) {
 		SkipAuth:       true,
 	}, nil)
 	if err != nil {
-		t.Fatalf("NewClient() error = %v", err)
+		t.Fatalf("newClient() error = %v", err)
 	}
 
 	if client.Timeout != 2*time.Second {
 		t.Fatalf("client.Timeout = %s", client.Timeout)
 	}
-	proxyTransport, ok := client.Transport.(*Transport)
+	proxyTransport, ok := client.Transport.(*transport)
 	if !ok {
 		t.Fatalf("client.Transport type = %T", client.Transport)
 	}
@@ -261,7 +261,7 @@ func TestTransportRetriesTransientHTTPStatus(t *testing.T) {
 		},
 	}
 	var logs bytes.Buffer
-	transport := &Transport{
+	transport := &transport{
 		Base:       base,
 		Logger:     slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		Retries:    1,
@@ -289,7 +289,7 @@ func TestTransportRetriesTransientHTTPStatus(t *testing.T) {
 func TestTransportLogsRedactedHeaders(t *testing.T) {
 	base := &sequenceRoundTripper{responses: []*http.Response{responseWithStatus(http.StatusOK)}}
 	var logs bytes.Buffer
-	transport := &Transport{
+	transport := &transport{
 		Base:     base,
 		Logger:   slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
 		SkipAuth: true,
@@ -314,15 +314,15 @@ func TestTransportLogsRedactedHeaders(t *testing.T) {
 
 func TestTransportUserAgentIncludesClientInfoWhenTelemetryEnabled(t *testing.T) {
 	base := &captureRoundTripper{}
-	transport, err := NewTransportWithOptions(context.Background(), httpConfig{
+	transport, err := newTransportWithOptions(context.Background(), httpConfig{
 		SkipAuth: true,
-	}, base, ClientOptions{
+	}, base, clientOptions{
 		ClientName:    "My Client",
 		ClientVersion: "2.0",
 		Version:       "1.2.3",
 	})
 	if err != nil {
-		t.Fatalf("NewTransportWithOptions() error = %v", err)
+		t.Fatalf("newTransportWithOptions() error = %v", err)
 	}
 
 	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
@@ -342,16 +342,16 @@ func TestTransportUserAgentIncludesClientInfoWhenTelemetryEnabled(t *testing.T) 
 
 func TestTransportUserAgentOmitsClientInfoWhenTelemetryDisabled(t *testing.T) {
 	base := &captureRoundTripper{}
-	transport, err := NewTransportWithOptions(context.Background(), httpConfig{
+	transport, err := newTransportWithOptions(context.Background(), httpConfig{
 		DisableTelemetry: true,
 		SkipAuth:         true,
-	}, base, ClientOptions{
+	}, base, clientOptions{
 		ClientName:    "My Client",
 		ClientVersion: "2.0",
 		Version:       "1.2.3",
 	})
 	if err != nil {
-		t.Fatalf("NewTransportWithOptions() error = %v", err)
+		t.Fatalf("newTransportWithOptions() error = %v", err)
 	}
 
 	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
@@ -396,10 +396,10 @@ func TestDeadlineConnAppliesReadAndWriteDeadlines(t *testing.T) {
 }
 
 func TestRedactHeader(t *testing.T) {
-	if got := RedactHeader("Authorization", "secret"); got != "[REDACTED]" {
+	if got := redactHeader("Authorization", "secret"); got != "[REDACTED]" {
 		t.Fatalf("Authorization redaction = %q", got)
 	}
-	if got := RedactHeader("Accept", "application/json"); got != "application/json" {
+	if got := redactHeader("Accept", "application/json"); got != "application/json" {
 		t.Fatalf("Accept redaction = %q", got)
 	}
 }

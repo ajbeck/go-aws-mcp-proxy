@@ -25,9 +25,6 @@ type Config struct {
 	SkipAuth         bool
 }
 
-// LookupEnv looks up an environment variable by name.
-type LookupEnv func(string) (string, bool)
-
 func (c Config) httpConfig() httpConfig {
 	return httpConfig{
 		Service:          c.Service,
