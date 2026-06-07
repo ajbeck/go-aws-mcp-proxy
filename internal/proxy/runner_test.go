@@ -79,7 +79,7 @@ func (s *fakeSession) ListTools(context.Context, *mcp.ListToolsParams) (*mcp.Lis
 	return &mcp.ListToolsResult{Tools: s.tools}, nil
 }
 
-func TestRuntimeConnectsUpstreamDuringInitialize(t *testing.T) {
+func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	upstreamCaps := &mcp.ServerCapabilities{
 		Tools:     &mcp.ToolCapabilities{ListChanged: true},
@@ -87,7 +87,7 @@ func TestRuntimeConnectsUpstreamDuringInitialize(t *testing.T) {
 	}
 	session := &fakeSession{result: &mcp.InitializeResult{Capabilities: upstreamCaps}}
 	connector := &fakeConnector{sess: session}
-	runner := Runner{
+	options := RunOptions{
 		Connector: connector,
 		Transport: serverTransport,
 		Version:   "test-version",
@@ -98,7 +98,7 @@ func TestRuntimeConnectsUpstreamDuringInitialize(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
+		errs <- Run(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -134,17 +134,17 @@ func TestRuntimeConnectsUpstreamDuringInitialize(t *testing.T) {
 	select {
 	case err := <-errs:
 		if err != nil {
-			t.Fatalf("runner returned error = %v", err)
+			t.Fatalf("proxy run returned error = %v", err)
 		}
 	case <-ctx.Done():
-		t.Fatal("runner did not exit after client session closed")
+		t.Fatal("proxy did not exit after client session closed")
 	}
 	if !session.closed {
 		t.Fatal("upstream session was not closed")
 	}
 }
 
-func TestRuntimeRegistersAndForwardsUpstreamTools(t *testing.T) {
+func TestRunRegistersAndForwardsUpstreamTools(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	upstreamResult := &mcp.CallToolResult{
 		Content: []mcp.Content{&mcp.TextContent{Text: "forwarded"}},
@@ -162,7 +162,7 @@ func TestRuntimeRegistersAndForwardsUpstreamTools(t *testing.T) {
 		},
 		callResult: upstreamResult,
 	}
-	runner := Runner{
+	options := RunOptions{
 		Connector: &fakeConnector{sess: session},
 		Transport: serverTransport,
 		Version:   "test-version",
@@ -173,10 +173,10 @@ func TestRuntimeRegistersAndForwardsUpstreamTools(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{
+		errs <- Run(ctx, Config{
 			Endpoint:    "https://service.us-east-1.api.aws/mcp",
 			ToolTimeout: 5 * time.Second,
-		}, nil)
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -225,10 +225,10 @@ func TestRuntimeRegistersAndForwardsUpstreamTools(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRuntimeInjectsAWSProfileIntoAuthToolSchema(t *testing.T) {
+func TestRunInjectsAWSProfileIntoAuthToolSchema(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{
 		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
@@ -237,17 +237,17 @@ func TestRuntimeInjectsAWSProfileIntoAuthToolSchema(t *testing.T) {
 			{Name: "aws___search_documentation", InputSchema: map[string]any{"type": "object", "properties": map[string]any{}}},
 		},
 	}
-	runner := Runner{Connector: &fakeConnector{sess: session}, Transport: serverTransport, Version: "test-version"}
+	options := RunOptions{Connector: &fakeConnector{sess: session}, Transport: serverTransport, Version: "test-version"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{
+		errs <- Run(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
-		}, nil)
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -280,10 +280,10 @@ func TestRuntimeInjectsAWSProfileIntoAuthToolSchema(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRuntimeRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
+func TestRunRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	defaultSession := &fakeSession{
 		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
@@ -299,17 +299,17 @@ func TestRuntimeRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
 			"dev": devSession,
 		},
 	}
-	runner := Runner{Connector: connector, Transport: serverTransport, Version: "test-version"}
+	options := RunOptions{Connector: connector, Transport: serverTransport, Version: "test-version"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{
+		errs <- Run(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
-		}, nil)
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -351,30 +351,30 @@ func TestRuntimeRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 	if !devSession.closed {
 		t.Fatal("profile override session was not closed")
 	}
 }
 
-func TestRuntimeRoutesDefaultAWSProfileThroughDefaultSession(t *testing.T) {
+func TestRunRoutesDefaultAWSProfileThroughDefaultSession(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	defaultSession := &fakeSession{
 		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
 		tools:  []*mcp.Tool{{Name: "aws___call_aws", InputSchema: map[string]any{"type": "object"}}},
 	}
 	connector := &fakeConnector{sess: defaultSession}
-	runner := Runner{Connector: connector, Transport: serverTransport, Version: "test-version"}
+	options := RunOptions{Connector: connector, Transport: serverTransport, Version: "test-version"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{
+		errs <- Run(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
-		}, nil)
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -407,26 +407,26 @@ func TestRuntimeRoutesDefaultAWSProfileThroughDefaultSession(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRuntimeRejectsDisallowedAWSProfile(t *testing.T) {
+func TestRunRejectsDisallowedAWSProfile(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{
 		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
 		tools:  []*mcp.Tool{{Name: "aws___call_aws", InputSchema: map[string]any{"type": "object"}}},
 	}
-	runner := Runner{Connector: &fakeConnector{sess: session}, Transport: serverTransport, Version: "test-version"}
+	options := RunOptions{Connector: &fakeConnector{sess: session}, Transport: serverTransport, Version: "test-version"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{
+		errs <- Run(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
-		}, nil)
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -453,27 +453,27 @@ func TestRuntimeRejectsDisallowedAWSProfile(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRuntimeStripsAWSProfileFromNonAuthTool(t *testing.T) {
+func TestRunStripsAWSProfileFromNonAuthTool(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{
 		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
 		tools:  []*mcp.Tool{{Name: "aws___search_documentation", InputSchema: map[string]any{"type": "object"}}},
 	}
 	connector := &fakeConnector{sess: session}
-	runner := Runner{Connector: connector, Transport: serverTransport, Version: "test-version"}
+	options := RunOptions{Connector: connector, Transport: serverTransport, Version: "test-version"}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{
+		errs <- Run(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			Profiles: []string{"default", "dev"},
-		}, nil)
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -506,10 +506,10 @@ func TestRuntimeStripsAWSProfileFromNonAuthTool(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRuntimeFiltersReadOnlyTools(t *testing.T) {
+func TestRunFiltersReadOnlyTools(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{
 		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
@@ -530,7 +530,7 @@ func TestRuntimeFiltersReadOnlyTools(t *testing.T) {
 			},
 		},
 	}
-	runner := Runner{
+	options := RunOptions{
 		Connector: &fakeConnector{sess: session},
 		Transport: serverTransport,
 		Version:   "test-version",
@@ -541,10 +541,10 @@ func TestRuntimeFiltersReadOnlyTools(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{
+		errs <- Run(ctx, Config{
 			Endpoint: "https://service.us-east-1.api.aws/mcp",
 			ReadOnly: true,
-		}, nil)
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -564,17 +564,17 @@ func TestRuntimeFiltersReadOnlyTools(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRuntimeReturnsToolVisibleErrorOnUpstreamCallFailure(t *testing.T) {
+func TestRunReturnsToolVisibleErrorOnUpstreamCallFailure(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{
 		result:  &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
 		tools:   []*mcp.Tool{{Name: "failing", InputSchema: map[string]any{"type": "object"}}},
 		callErr: errors.New("upstream unavailable"),
 	}
-	runner := Runner{
+	options := RunOptions{
 		Connector: &fakeConnector{sess: session},
 		Transport: serverTransport,
 		Version:   "test-version",
@@ -585,7 +585,7 @@ func TestRuntimeReturnsToolVisibleErrorOnUpstreamCallFailure(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
+		errs <- Run(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -612,10 +612,10 @@ func TestRuntimeReturnsToolVisibleErrorOnUpstreamCallFailure(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRuntimeAppliesToolTimeout(t *testing.T) {
+func TestRunAppliesToolTimeout(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{
 		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
@@ -624,7 +624,7 @@ func TestRuntimeAppliesToolTimeout(t *testing.T) {
 		},
 		waitForContextDone: true,
 	}
-	runner := Runner{
+	options := RunOptions{
 		Connector: &fakeConnector{sess: session},
 		Transport: serverTransport,
 		Version:   "test-version",
@@ -635,10 +635,10 @@ func TestRuntimeAppliesToolTimeout(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{
+		errs <- Run(ctx, Config{
 			Endpoint:    "https://service.us-east-1.api.aws/mcp",
 			ToolTimeout: time.Millisecond,
-		}, nil)
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -662,14 +662,14 @@ func TestRuntimeAppliesToolTimeout(t *testing.T) {
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
-	waitForRunnerExit(t, ctx, errs)
+	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRuntimeReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
+func TestRunReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	wantErr := errors.New("connect failed")
 	connector := &fakeConnector{err: wantErr}
-	runner := Runner{
+	options := RunOptions{
 		Connector: connector,
 		Transport: serverTransport,
 		Version:   "test-version",
@@ -680,7 +680,7 @@ func TestRuntimeReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- runner.RunProxy(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, nil)
+		errs <- Run(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -696,7 +696,7 @@ func TestRuntimeReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
 	select {
 	case <-errs:
 	case <-time.After(5 * time.Second):
-		t.Fatal("runner did not exit after context cancellation")
+		t.Fatal("proxy did not exit after context cancellation")
 	}
 }
 
@@ -711,16 +711,16 @@ func TestApplyUpstreamCapabilitiesKeepsLocalWhenUpstreamCapabilitiesMissing(t *t
 	}
 }
 
-func waitForRunnerExit(t *testing.T, ctx context.Context, errs <-chan error) {
+func waitForProxyRunExit(t *testing.T, ctx context.Context, errs <-chan error) {
 	t.Helper()
 
 	select {
 	case err := <-errs:
 		if err != nil {
-			t.Fatalf("runner returned error = %v", err)
+			t.Fatalf("proxy run returned error = %v", err)
 		}
 	case <-ctx.Done():
-		t.Fatal("runner did not exit after client session closed")
+		t.Fatal("proxy did not exit after client session closed")
 	}
 }
 

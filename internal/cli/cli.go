@@ -22,13 +22,11 @@ const (
 	exitUsage = 2
 )
 
-type ProxyRunner interface {
-	RunProxy(context.Context, proxy.Config, *slog.Logger) error
-}
+type RunProxy func(context.Context, proxy.Config, *slog.Logger) error
 
 type Options struct {
 	LookupEnv proxy.LookupEnv
-	Runner    ProxyRunner
+	RunProxy  RunProxy
 	Stderr    io.Writer
 	Stdout    io.Writer
 	Version   string
@@ -94,13 +92,8 @@ func Run(ctx context.Context, args []string, options Options) int {
 		fmt.Fprintln(options.Stderr, err)
 		return exitUsage
 	}
-	if options.Runner == nil {
-		fmt.Fprintln(options.Stderr, "runner is required")
-		return exitError
-	}
-
 	cfg := application.config(options.LookupEnv)
-	if err := options.Runner.RunProxy(ctx, cfg, newLogger(cfg.LogLevel, options.Stderr)); err != nil {
+	if err := options.RunProxy(ctx, cfg, newLogger(cfg.LogLevel, options.Stderr)); err != nil {
 		fmt.Fprintln(options.Stderr, err)
 		return exitCodeForError(err)
 	}
@@ -120,14 +113,22 @@ func (o Options) withDefaults() Options {
 	if o.LookupEnv == nil {
 		o.LookupEnv = os.LookupEnv
 	}
+	if o.Version == "" {
+		o.Version = "dev"
+	}
+	if o.RunProxy == nil {
+		o.RunProxy = func(ctx context.Context, cfg proxy.Config, logger *slog.Logger) error {
+			return proxy.Run(ctx, cfg, proxy.RunOptions{
+				Logger:  logger,
+				Version: o.Version,
+			})
+		}
+	}
 	if o.Stderr == nil {
 		o.Stderr = os.Stderr
 	}
 	if o.Stdout == nil {
 		o.Stdout = os.Stdout
-	}
-	if o.Version == "" {
-		o.Version = "dev"
 	}
 	return o
 }

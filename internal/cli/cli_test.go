@@ -11,13 +11,13 @@ import (
 	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxy"
 )
 
-type fakeRunner struct {
+type fakeProxyRun struct {
 	called bool
 	config proxy.Config
 	logger *slog.Logger
 }
 
-func (r *fakeRunner) RunProxy(_ context.Context, config proxy.Config, logger *slog.Logger) error {
+func (r *fakeProxyRun) call(_ context.Context, config proxy.Config, logger *slog.Logger) error {
 	r.called = true
 	r.config = config
 	r.logger = logger
@@ -25,7 +25,7 @@ func (r *fakeRunner) RunProxy(_ context.Context, config proxy.Config, logger *sl
 }
 
 func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
-	runner := &fakeRunner{}
+	run := &fakeProxyRun{}
 	var stdout, stderr bytes.Buffer
 
 	code := Run(t.Context(), []string{
@@ -46,23 +46,23 @@ func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
 		"--disable-telemetry",
 		"--skip-auth",
 	}, Options{
-		Runner:  runner,
-		Stderr:  &stderr,
-		Stdout:  &stdout,
-		Version: "test",
+		RunProxy: run.call,
+		Stderr:   &stderr,
+		Stdout:   &stdout,
+		Version:  "test",
 	})
 
 	if code != exitOK {
 		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 	}
-	if !runner.called {
-		t.Fatal("runner was not called")
+	if !run.called {
+		t.Fatal("proxy run was not called")
 	}
-	if runner.logger == nil {
-		t.Fatal("logger was not passed to runner")
+	if run.logger == nil {
+		t.Fatal("logger was not passed to proxy run")
 	}
 
-	cfg := runner.config
+	cfg := run.config
 	if cfg.Endpoint != "https://bedrock-agentcore.us-east-1.amazonaws.com/mcp" {
 		t.Fatalf("Endpoint = %q", cfg.Endpoint)
 	}
@@ -100,23 +100,23 @@ func TestRunParsesUpstreamCompatibleRootCommand(t *testing.T) {
 }
 
 func TestLoggerHonorsLogLevelAndWritesToStderr(t *testing.T) {
-	runner := &fakeRunner{}
+	run := &fakeProxyRun{}
 	var stdout, stderr bytes.Buffer
 
 	code := Run(t.Context(), []string{
 		"https://service.us-east-1.api.aws/mcp",
 		"--log-level", "DEBUG",
 	}, Options{
-		Runner:  runner,
-		Stderr:  &stderr,
-		Stdout:  &stdout,
-		Version: "test",
+		RunProxy: run.call,
+		Stderr:   &stderr,
+		Stdout:   &stdout,
+		Version:  "test",
 	})
 	if code != exitOK {
 		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
 	}
 
-	runner.logger.Debug("debug message")
+	run.logger.Debug("debug message")
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty", stdout.String())
 	}
@@ -142,31 +142,14 @@ func TestRunUsesVersionFlag(t *testing.T) {
 	}
 }
 
-func TestRunRequiresRunner(t *testing.T) {
-	var stdout, stderr bytes.Buffer
-
-	code := Run(t.Context(), []string{"https://service.us-east-1.api.aws/mcp"}, Options{
-		Stderr:  &stderr,
-		Stdout:  &stdout,
-		Version: "test",
-	})
-
-	if code != exitError {
-		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "runner is required") {
-		t.Fatalf("stderr = %q, want runner error", stderr.String())
-	}
-}
-
 func TestRunReturnsUsageForParseErrors(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 
 	code := Run(t.Context(), []string{"--profile"}, Options{
-		Runner:  &fakeRunner{},
-		Stderr:  &stderr,
-		Stdout:  &stdout,
-		Version: "test",
+		RunProxy: (&fakeProxyRun{}).call,
+		Stderr:   &stderr,
+		Stdout:   &stdout,
+		Version:  "test",
 	})
 
 	if code != exitUsage {
