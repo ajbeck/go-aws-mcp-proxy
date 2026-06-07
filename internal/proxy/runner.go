@@ -29,28 +29,26 @@ type UpstreamSession interface {
 	ListTools(context.Context, *mcp.ListToolsParams) (*mcp.ListToolsResult, error)
 }
 
-type Runner struct {
+type RunOptions struct {
 	Connector UpstreamConnector
 	Logger    *slog.Logger
 	Transport mcp.Transport
 	Version   string
 }
 
-func (r Runner) RunProxy(ctx context.Context, cfg Config, logger *slog.Logger) error {
-	if r.Logger != nil {
-		logger = r.Logger
-	}
-	runtime := Runtime{
+func Run(ctx context.Context, cfg Config, options RunOptions) error {
+	logger := options.Logger
+	run := proxyRun{
 		config:    cfg,
-		connector: r.Connector,
+		connector: options.Connector,
 		logger:    logger,
-		transport: r.Transport,
-		version:   r.Version,
+		transport: options.Transport,
+		version:   options.Version,
 	}
-	return runtime.Run(ctx)
+	return run.run(ctx)
 }
 
-type Runtime struct {
+type proxyRun struct {
 	config    Config
 	connector UpstreamConnector
 	logger    *slog.Logger
@@ -62,7 +60,7 @@ type Runtime struct {
 	upstream upstreamState
 }
 
-func (r *Runtime) Run(ctx context.Context) error {
+func (r *proxyRun) run(ctx context.Context) error {
 	server := r.newServer()
 	r.server = server
 	server.AddReceivingMiddleware(r.initializeMiddleware())
@@ -77,7 +75,7 @@ func (r *Runtime) Run(ctx context.Context) error {
 	return server.Run(ctx, transport)
 }
 
-func (r *Runtime) newServer() *mcp.Server {
+func (r *proxyRun) newServer() *mcp.Server {
 	version := r.version
 	if version == "" {
 		version = "dev"
@@ -96,7 +94,7 @@ func (r *Runtime) newServer() *mcp.Server {
 	})
 }
 
-func (r *Runtime) initializeMiddleware() mcp.Middleware {
+func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 	return func(next mcp.MethodHandler) mcp.MethodHandler {
 		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
 			if method != "initialize" {
@@ -133,7 +131,7 @@ func (r *Runtime) initializeMiddleware() mcp.Middleware {
 	}
 }
 
-func (r *Runtime) registerUpstreamTools(ctx context.Context, upstream UpstreamSession) error {
+func (r *proxyRun) registerUpstreamTools(ctx context.Context, upstream UpstreamSession) error {
 	result, err := upstream.ListTools(ctx, &mcp.ListToolsParams{})
 	if err != nil {
 		return err
@@ -151,7 +149,7 @@ func (r *Runtime) registerUpstreamTools(ctx context.Context, upstream UpstreamSe
 	return nil
 }
 
-func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
+func (r *proxyRun) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 	if tool == nil || tool.Name == "" {
 		return
 	}
@@ -188,7 +186,7 @@ func (r *Runtime) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 	})
 }
 
-func (r *Runtime) callUpstreamTool(ctx context.Context, upstream UpstreamSession, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSession, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	args, profile, err := argumentsAndProfile(req.Params.Arguments)
 	if err != nil {
 		return nil, err
@@ -233,7 +231,7 @@ func (r *Runtime) callUpstreamTool(ctx context.Context, upstream UpstreamSession
 	})
 }
 
-func (r *Runtime) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
+func (r *proxyRun) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
 	connector := r.connector
 	if connector == nil {
 		connector = MCPUpstreamConnector{Logger: r.logger, Version: r.version}
@@ -513,7 +511,7 @@ func (s *profileSessions) SetInitializeParams(params *mcp.InitializeParams) {
 	s.params = params
 }
 
-func (s *profileSessions) Get(ctx context.Context, profile string, runtime *Runtime) (UpstreamSession, error) {
+func (s *profileSessions) Get(ctx context.Context, profile string, run *proxyRun) (UpstreamSession, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.cache != nil {
@@ -523,11 +521,11 @@ func (s *profileSessions) Get(ctx context.Context, profile string, runtime *Runt
 	}
 	params := s.params
 
-	cfg := runtime.config
+	cfg := run.config
 	cfg.Profiles = []string{profile}
-	connector := runtime.connector
+	connector := run.connector
 	if connector == nil {
-		connector = MCPUpstreamConnector{Logger: runtime.logger, Version: runtime.version}
+		connector = MCPUpstreamConnector{Logger: run.logger, Version: run.version}
 	}
 
 	session, err := connector.Connect(ctx, cfg, params)

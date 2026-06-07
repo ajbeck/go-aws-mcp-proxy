@@ -2,7 +2,7 @@ package proxy
 
 import "time"
 
-// Config describes a proxy runtime.
+// Config describes a proxy run.
 type Config struct {
 	Endpoint string
 	Service  string
