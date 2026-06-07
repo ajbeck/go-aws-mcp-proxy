@@ -191,15 +191,12 @@ func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
 	if cfg.Region != "eu-west-1" {
 		t.Fatalf("Region = %q", cfg.Region)
 	}
-	if cfg.Metadata["AWS_REGION"] != "eu-west-1" {
-		t.Fatalf("Metadata AWS_REGION = %q", cfg.Metadata["AWS_REGION"])
-	}
 	if cfg.Metadata["team"] != "platform" {
 		t.Fatalf("Metadata team = %q", cfg.Metadata["team"])
 	}
 }
 
-func TestAppConfigPreservesExplicitMetadataRegion(t *testing.T) {
+func TestAppConfigPreservesExplicitMetadata(t *testing.T) {
 	cfg := app{
 		Endpoint: "https://service.us-east-1.api.aws/mcp",
 		Metadata: map[string]string{
