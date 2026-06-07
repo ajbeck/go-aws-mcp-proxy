@@ -23,28 +23,28 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 )
 
-type CredentialsProvider interface {
+type credentialsProvider interface {
 	Retrieve(context.Context) (aws.Credentials, error)
 }
 
-type Signer interface {
+type signer interface {
 	SignHTTP(context.Context, aws.Credentials, *http.Request, string, string, string, time.Time, ...func(*v4.SignerOptions)) error
 }
 
-type Clock interface {
+type clock interface {
 	Now() time.Time
 }
 
-type SystemClock struct{}
+type systemClock struct{}
 
-func (SystemClock) Now() time.Time {
+func (systemClock) Now() time.Time {
 	return time.Now()
 }
 
-type Transport struct {
+type transport struct {
 	Base        http.RoundTripper
-	Clock       Clock
-	Credentials CredentialsProvider
+	Clock       clock
+	Credentials credentialsProvider
 	Metadata    map[string]string
 	Logger      *slog.Logger
 	Profile     string
@@ -52,7 +52,7 @@ type Transport struct {
 	Retries     int
 	RetryDelay  func(int) time.Duration
 	Service     string
-	Signer      Signer
+	Signer      signer
 	SkipAuth    bool
 	UserAgent   string
 }
@@ -72,9 +72,9 @@ type httpConfig struct {
 	SkipAuth         bool
 }
 
-func NewClient(ctx context.Context, cfg httpConfig, base *http.Client, loggers ...*slog.Logger) (*http.Client, error) {
-	options := ClientOptions{Logger: firstLogger(loggers)}
-	transport, err := NewTransportWithOptions(ctx, cfg, baseTransport(base), options)
+func newClient(ctx context.Context, cfg httpConfig, base *http.Client, loggers ...*slog.Logger) (*http.Client, error) {
+	options := clientOptions{Logger: firstLogger(loggers)}
+	transport, err := newTransportWithOptions(ctx, cfg, baseTransport(base), options)
 	if err != nil {
 		return nil, err
 	}
@@ -90,19 +90,19 @@ func NewClient(ctx context.Context, cfg httpConfig, base *http.Client, loggers .
 	return &client, nil
 }
 
-func NewTransport(ctx context.Context, cfg httpConfig, base http.RoundTripper, loggers ...*slog.Logger) (*Transport, error) {
-	return NewTransportWithOptions(ctx, cfg, base, ClientOptions{Logger: firstLogger(loggers)})
+func newTransport(ctx context.Context, cfg httpConfig, base http.RoundTripper, loggers ...*slog.Logger) (*transport, error) {
+	return newTransportWithOptions(ctx, cfg, base, clientOptions{Logger: firstLogger(loggers)})
 }
 
-type ClientOptions struct {
+type clientOptions struct {
 	ClientName    string
 	ClientVersion string
 	Logger        *slog.Logger
 	Version       string
 }
 
-func NewClientWithOptions(ctx context.Context, cfg httpConfig, base *http.Client, options ClientOptions) (*http.Client, error) {
-	transport, err := NewTransportWithOptions(ctx, cfg, baseTransport(base), options)
+func newClientWithOptions(ctx context.Context, cfg httpConfig, base *http.Client, options clientOptions) (*http.Client, error) {
+	transport, err := newTransportWithOptions(ctx, cfg, baseTransport(base), options)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +118,7 @@ func NewClientWithOptions(ctx context.Context, cfg httpConfig, base *http.Client
 	return &client, nil
 }
 
-func NewTransportWithOptions(ctx context.Context, cfg httpConfig, base http.RoundTripper, options ClientOptions) (*Transport, error) {
+func newTransportWithOptions(ctx context.Context, cfg httpConfig, base http.RoundTripper, options clientOptions) (*transport, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -142,7 +142,7 @@ func NewTransportWithOptions(ctx context.Context, cfg httpConfig, base http.Roun
 		}
 	}
 
-	var provider CredentialsProvider
+	var provider credentialsProvider
 	if !cfg.SkipAuth {
 		awsCfg, err := loadAWSConfig(ctx, cfg, caBundle)
 		if err != nil {
@@ -151,9 +151,9 @@ func NewTransportWithOptions(ctx context.Context, cfg httpConfig, base http.Roun
 		provider = awsCfg.Credentials
 	}
 
-	return &Transport{
+	return &transport{
 		Base:        base,
-		Clock:       SystemClock{},
+		Clock:       systemClock{},
 		Credentials: provider,
 		Logger:      options.Logger,
 		Metadata:    cfg.Metadata,
@@ -174,7 +174,7 @@ func firstLogger(loggers []*slog.Logger) *slog.Logger {
 	return loggers[0]
 }
 
-func userAgent(options ClientOptions, disableTelemetry bool) string {
+func userAgent(options clientOptions, disableTelemetry bool) string {
 	version := options.Version
 	if version == "" {
 		version = "dev"
@@ -335,7 +335,7 @@ func (c *deadlineConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
-func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	base := t.Base
 	if base == nil {
 		base = http.DefaultTransport
@@ -384,13 +384,13 @@ func (t *Transport) RoundTrip(req *http.Request) (*http.Response, error) {
 	}
 }
 
-func (t *Transport) applyHeaders(req *http.Request) {
+func (t *transport) applyHeaders(req *http.Request) {
 	if t.UserAgent != "" && req.Header.Get("User-Agent") == "" {
 		req.Header.Set("User-Agent", t.UserAgent)
 	}
 }
 
-func (t *Transport) shouldRetry(ctx context.Context, resp *http.Response, err error, attempt, maxRetries int) bool {
+func (t *transport) shouldRetry(ctx context.Context, resp *http.Response, err error, attempt, maxRetries int) bool {
 	if maxRetries <= 0 || attempt >= maxRetries || ctx.Err() != nil {
 		return false
 	}
@@ -409,7 +409,7 @@ func retryableStatus(status int) bool {
 	}
 }
 
-func (t *Transport) retryDelay(attempt int) time.Duration {
+func (t *transport) retryDelay(attempt int) time.Duration {
 	if t.RetryDelay != nil {
 		return t.RetryDelay(attempt)
 	}
@@ -434,7 +434,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 	}
 }
 
-func (t *Transport) logRequest(req *http.Request, resp *http.Response, err error, attempt int, duration time.Duration) {
+func (t *transport) logRequest(req *http.Request, resp *http.Response, err error, attempt int, duration time.Duration) {
 	if t.Logger == nil {
 		return
 	}
@@ -462,7 +462,7 @@ func (t *Transport) logRequest(req *http.Request, resp *http.Response, err error
 	t.Logger.Debug("upstream HTTP request completed", append(attrs, "headers", sanitizedHeaders(req.Header))...)
 }
 
-func (t *Transport) logRetry(req *http.Request, resp *http.Response, err error, attempt int) {
+func (t *transport) logRetry(req *http.Request, resp *http.Response, err error, attempt int) {
 	if t.Logger == nil {
 		return
 	}
@@ -482,14 +482,14 @@ func (t *Transport) logRetry(req *http.Request, resp *http.Response, err error, 
 	t.Logger.Warn("retrying upstream HTTP request", attrs...)
 }
 
-func (t *Transport) sign(req *http.Request, body []byte, credentials aws.Credentials) error {
+func (t *transport) sign(req *http.Request, body []byte, credentials aws.Credentials) error {
 	signer := t.Signer
 	if signer == nil {
 		signer = v4.NewSigner()
 	}
 	clock := t.Clock
 	if clock == nil {
-		clock = SystemClock{}
+		clock = systemClock{}
 	}
 
 	req.Header.Del("Connection")
@@ -561,7 +561,7 @@ func injectMetadata(body []byte, metadata map[string]string) []byte {
 	return encoded
 }
 
-func RedactHeader(name, value string) string {
+func redactHeader(name, value string) string {
 	switch strings.ToLower(name) {
 	case "authorization", "x-amz-security-token", "x-amz-date":
 		return "[REDACTED]"
@@ -575,7 +575,7 @@ func sanitizedHeaders(headers http.Header) map[string][]string {
 	for name, values := range headers {
 		redacted := make([]string, len(values))
 		for i, value := range values {
-			redacted[i] = RedactHeader(name, value)
+			redacted[i] = redactHeader(name, value)
 		}
 		out[name] = redacted
 	}

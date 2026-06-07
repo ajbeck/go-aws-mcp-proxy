@@ -13,7 +13,7 @@ import (
 
 	"github.com/alecthomas/kong"
 
-	"github.com/ajbeck/go-aws-mcp-proxy/internal/proxy"
+	"github.com/ajbeck/go-aws-mcp-proxy/proxy"
 )
 
 const (
@@ -24,8 +24,10 @@ const (
 
 type RunProxy func(context.Context, proxy.Config, *slog.Logger) error
 
+type LookupEnv func(string) (string, bool)
+
 type Options struct {
-	LookupEnv proxy.LookupEnv
+	LookupEnv LookupEnv
 	RunProxy  RunProxy
 	Stderr    io.Writer
 	Stdout    io.Writer
@@ -133,7 +135,7 @@ func (o Options) withDefaults() Options {
 	return o
 }
 
-func (a app) config(lookupEnv proxy.LookupEnv) proxy.Config {
+func (a app) config(lookupEnv LookupEnv) proxy.Config {
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
 	}

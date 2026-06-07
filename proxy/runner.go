@@ -18,10 +18,12 @@ const (
 	defaultInstructions = "MCP Proxy for AWS provides access to SigV4 protected MCP servers through a single interface."
 )
 
+// UpstreamConnector opens an MCP client session to the configured upstream.
 type UpstreamConnector interface {
 	Connect(context.Context, Config, *mcp.InitializeParams) (UpstreamSession, error)
 }
 
+// UpstreamSession is the upstream MCP session behavior used by the proxy.
 type UpstreamSession interface {
 	CallTool(context.Context, *mcp.CallToolParams) (*mcp.CallToolResult, error)
 	Close() error
@@ -29,31 +31,42 @@ type UpstreamSession interface {
 	ListTools(context.Context, *mcp.ListToolsParams) (*mcp.ListToolsResult, error)
 }
 
+// RunOptions configures embedding and test seams for Run.
 type RunOptions struct {
+	// Connector replaces the default Streamable HTTP upstream connector.
 	Connector UpstreamConnector
-	Logger    *slog.Logger
+	// HTTPClient is used by the default upstream connector.
+	HTTPClient *http.Client
+	// Logger receives proxy and request logs.
+	Logger *slog.Logger
+	// Transport is the MCP server transport. It defaults to stdio.
 	Transport mcp.Transport
-	Version   string
+	// Version is reported in MCP implementation metadata and user-agent data.
+	Version string
 }
 
+// Run starts the proxy and blocks until the MCP server transport exits or the
+// context is canceled.
 func Run(ctx context.Context, cfg Config, options RunOptions) error {
 	logger := options.Logger
 	run := proxyRun{
-		config:    cfg,
-		connector: options.Connector,
-		logger:    logger,
-		transport: options.Transport,
-		version:   options.Version,
+		config:     cfg,
+		connector:  options.Connector,
+		httpClient: options.HTTPClient,
+		logger:     logger,
+		transport:  options.Transport,
+		version:    options.Version,
 	}
 	return run.run(ctx)
 }
 
 type proxyRun struct {
-	config    Config
-	connector UpstreamConnector
-	logger    *slog.Logger
-	transport mcp.Transport
-	version   string
+	config     Config
+	connector  UpstreamConnector
+	httpClient *http.Client
+	logger     *slog.Logger
+	transport  mcp.Transport
+	version    string
 
 	server   *mcp.Server
 	profiles profileSessions
@@ -234,7 +247,7 @@ func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSessio
 func (r *proxyRun) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
 	connector := r.connector
 	if connector == nil {
-		connector = MCPUpstreamConnector{Logger: r.logger, Version: r.version}
+		connector = mcpUpstreamConnector{HTTPClient: r.httpClient, Logger: r.logger, Version: r.version}
 	}
 
 	session, err := connector.Connect(ctx, r.config, params)
@@ -428,18 +441,18 @@ func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
 	}
 }
 
-type MCPUpstreamConnector struct {
+type mcpUpstreamConnector struct {
 	HTTPClient *http.Client
 	Logger     *slog.Logger
 	Version    string
 }
 
-func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg Config, params *mcp.InitializeParams) (UpstreamSession, error) {
+func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *mcp.InitializeParams) (UpstreamSession, error) {
 	version := c.Version
 	if version == "" {
 		version = "dev"
 	}
-	options := ClientOptions{
+	options := clientOptions{
 		Logger:  c.Logger,
 		Version: version,
 	}
@@ -447,7 +460,7 @@ func (c MCPUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 		options.ClientName = params.ClientInfo.Name
 		options.ClientVersion = params.ClientInfo.Version
 	}
-	httpClient, err := NewClientWithOptions(ctx, cfg.httpConfig(), c.HTTPClient, options)
+	httpClient, err := newClientWithOptions(ctx, cfg.httpConfig(), c.HTTPClient, options)
 	if err != nil {
 		return nil, err
 	}
@@ -525,7 +538,7 @@ func (s *profileSessions) Get(ctx context.Context, profile string, run *proxyRun
 	cfg.Profiles = []string{profile}
 	connector := run.connector
 	if connector == nil {
-		connector = MCPUpstreamConnector{Logger: run.logger, Version: run.version}
+		connector = mcpUpstreamConnector{HTTPClient: run.httpClient, Logger: run.logger, Version: run.version}
 	}
 
 	session, err := connector.Connect(ctx, cfg, params)
