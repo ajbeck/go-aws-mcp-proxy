@@ -148,18 +148,13 @@ func (a app) config(lookupEnv proxy.LookupEnv) proxy.Config {
 	if region == "" {
 		region, _ = lookupEnv("AWS_REGION")
 	}
-	metadata := cloneMetadata(a.Metadata)
-	if _, ok := metadata["AWS_REGION"]; !ok && region != "" {
-		metadata["AWS_REGION"] = region
-	}
-
 	return proxy.Config{
 		Endpoint:         a.Endpoint,
 		Service:          service,
 		Profiles:         dedupe(a.Profiles),
 		Region:           region,
 		CaBundle:         a.CaBundle,
-		Metadata:         metadata,
+		Metadata:         a.Metadata,
 		ReadOnly:         a.ReadOnly,
 		LogLevel:         a.LogLevel,
 		Retries:          a.Retries,
@@ -171,14 +166,6 @@ func (a app) config(lookupEnv proxy.LookupEnv) proxy.Config {
 		DisableTelemetry: a.DisableTelemetry,
 		SkipAuth:         a.SkipAuth,
 	}
-}
-
-func cloneMetadata(metadata map[string]string) map[string]string {
-	out := make(map[string]string, len(metadata)+1)
-	for key, value := range metadata {
-		out[key] = value
-	}
-	return out
 }
 
 func dedupe(values []string) []string {
