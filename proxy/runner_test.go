@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -79,6 +82,17 @@ func (s *fakeSession) ListTools(context.Context, *mcp.ListToolsParams) (*mcp.Lis
 	return &mcp.ListToolsResult{Tools: s.tools}, nil
 }
 
+type headerRoundTripper struct {
+	base  http.RoundTripper
+	name  string
+	value string
+}
+
+func (rt headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	req.Header.Set(rt.name, rt.value)
+	return rt.base.RoundTrip(req)
+}
+
 func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	upstreamCaps := &mcp.ServerCapabilities{
@@ -141,6 +155,58 @@ func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
 	}
 	if !session.closed {
 		t.Fatal("upstream session was not closed")
+	}
+}
+
+func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
+	const headerName = "X-Test-Proxy-Client"
+	const headerValue = "custom"
+
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return upstream
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	var sawCustomClient atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Header.Get(headerName) == headerValue {
+			sawCustomClient.Store(true)
+		}
+		handler.ServeHTTP(w, req)
+	}))
+	t.Cleanup(server.Close)
+
+	client := &http.Client{
+		Transport: headerRoundTripper{
+			base:  http.DefaultTransport,
+			name:  headerName,
+			value: headerValue,
+		},
+	}
+
+	run := proxyRun{
+		config: Config{
+			Endpoint: server.URL,
+			SkipAuth: true,
+		},
+		httpClient: client,
+		version:    "test-version",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	session, err := run.connectUpstream(ctx, &mcp.InitializeParams{
+		ClientInfo: &mcp.Implementation{Name: "test-client", Version: "1.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("connectUpstream() error = %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("session.Close() error = %v", err)
+	}
+	if !sawCustomClient.Load() {
+		t.Fatal("upstream did not receive a request through the custom HTTP client")
 	}
 }
 
