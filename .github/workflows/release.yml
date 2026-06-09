@@ -30,7 +30,8 @@ jobs:
       version: ${{ steps.validate.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v6.0.2
+        # https://github.com/actions/checkout
+        uses: actions/checkout@v6.0.3
         with:
           fetch-depth: 0
 
@@ -85,11 +86,13 @@ jobs:
           echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
 
       - name: Run CI at release commit
-        uses: actions/checkout@v6.0.2
+        # https://github.com/actions/checkout
+        uses: actions/checkout@v6.0.3
         with:
           ref: ${{ steps.validate.outputs.commit }}
 
       - name: Set up Go
+        # https://github.com/actions/setup-go
         uses: actions/setup-go@v6.4.0
         with:
           go-version-file: go.mod
@@ -135,11 +138,13 @@ jobs:
             archive: zip
     steps:
       - name: Checkout release commit
-        uses: actions/checkout@v6.0.2
+        # https://github.com/actions/checkout
+        uses: actions/checkout@v6.0.3
         with:
           ref: ${{ needs.validate-and-tag.outputs.commit }}
 
       - name: Set up Go
+        # https://github.com/actions/setup-go
         uses: actions/setup-go@v6.4.0
         with:
           go-version-file: go.mod
@@ -180,6 +185,7 @@ jobs:
           echo "asset=${asset}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload packaged binary
+        # https://github.com/actions/upload-artifact
         uses: actions/upload-artifact@v7.0.1
         with:
           name: ${{ steps.build.outputs.asset }}
@@ -197,6 +203,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Download release assets
+        # https://github.com/actions/download-artifact
         uses: actions/download-artifact@v8.0.1
         with:
           path: dist
