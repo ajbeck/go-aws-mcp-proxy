@@ -7,10 +7,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -41,68 +39,28 @@ func (systemClock) Now() time.Time {
 	return time.Now()
 }
 
-type transport struct {
-	Base        http.RoundTripper
-	Clock       clock
-	Credentials credentialsProvider
-	Metadata    map[string]string
-	Logger      *slog.Logger
-	Profile     string
-	Region      string
-	Retries     int
-	RetryDelay  func(int) time.Duration
-	Service     string
-	Signer      signer
-	SkipAuth    bool
-	UserAgent   string
+type userAgentRoundTripper struct {
+	base      http.RoundTripper
+	userAgent string
 }
 
-type httpConfig struct {
-	Service          string
-	Profile          string
-	Region           string
-	CaBundle         string
-	Metadata         map[string]string
-	Retries          int
-	Timeout          time.Duration
-	ConnectTimeout   time.Duration
-	ReadTimeout      time.Duration
-	WriteTimeout     time.Duration
-	DisableTelemetry bool
-	SkipAuth         bool
-}
-
-func newClient(ctx context.Context, cfg httpConfig, base *http.Client, loggers ...*slog.Logger) (*http.Client, error) {
-	options := clientOptions{Logger: firstLogger(loggers)}
-	transport, err := newTransportWithOptions(ctx, cfg, baseTransport(base), options)
-	if err != nil {
-		return nil, err
-	}
-
-	client := *http.DefaultClient
-	if base != nil {
-		client = *base
-	}
-	client.Transport = transport
-	if cfg.Timeout > 0 {
-		client.Timeout = cfg.Timeout
-	}
-	return &client, nil
-}
-
-func newTransport(ctx context.Context, cfg httpConfig, base http.RoundTripper, loggers ...*slog.Logger) (*transport, error) {
-	return newTransportWithOptions(ctx, cfg, base, clientOptions{Logger: firstLogger(loggers)})
+type sigV4RoundTripper struct {
+	base        http.RoundTripper
+	clock       clock
+	credentials credentialsProvider
+	region      string
+	service     string
+	signer      signer
 }
 
 type clientOptions struct {
 	ClientName    string
 	ClientVersion string
-	Logger        *slog.Logger
 	Version       string
 }
 
-func newClientWithOptions(ctx context.Context, cfg httpConfig, base *http.Client, options clientOptions) (*http.Client, error) {
-	transport, err := newTransportWithOptions(ctx, cfg, baseTransport(base), options)
+func newClient(ctx context.Context, cfg Config, base *http.Client, options clientOptions) (*http.Client, error) {
+	transport, err := newRoundTripper(ctx, cfg, baseRoundTripper(base), options)
 	if err != nil {
 		return nil, err
 	}
@@ -112,13 +70,13 @@ func newClientWithOptions(ctx context.Context, cfg httpConfig, base *http.Client
 		client = *base
 	}
 	client.Transport = transport
-	if cfg.Timeout > 0 {
-		client.Timeout = cfg.Timeout
+	if positiveDuration(cfg.Timeout) {
+		client.Timeout = *cfg.Timeout
 	}
 	return &client, nil
 }
 
-func newTransportWithOptions(ctx context.Context, cfg httpConfig, base http.RoundTripper, options clientOptions) (*transport, error) {
+func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, options clientOptions) (http.RoundTripper, error) {
 	if base == nil {
 		base = http.DefaultTransport
 	}
@@ -126,61 +84,58 @@ func newTransportWithOptions(ctx context.Context, cfg httpConfig, base http.Roun
 	var caBundle []byte
 	var err error
 	if hasTransportTimeouts(cfg) {
-		base, err = transportWithTimeouts(base, cfg)
+		base, err = roundTripperWithTimeouts(base, cfg)
 		if err != nil {
 			return nil, err
 		}
 	}
-	if cfg.CaBundle != "" {
-		caBundle, err = readCABundle(cfg.CaBundle)
+	if cfg.CaBundle != nil {
+		caBundle, err = readCABundle(*cfg.CaBundle)
 		if err != nil {
 			return nil, err
 		}
-		base, err = transportWithCABundle(base, cfg.CaBundle, caBundle)
+		base, err = roundTripperWithCABundle(base, *cfg.CaBundle, caBundle)
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	var provider credentialsProvider
-	if !cfg.SkipAuth {
+	rt := base
+	if !enabled(cfg.SkipAuth) {
+		service, err := required(cfg.Service, "service")
+		if err != nil {
+			return nil, err
+		}
+		region, err := required(cfg.Region, "region")
+		if err != nil {
+			return nil, err
+		}
 		awsCfg, err := loadAWSConfig(ctx, cfg, caBundle)
 		if err != nil {
 			return nil, err
 		}
-		provider = awsCfg.Credentials
+		rt = sigV4RoundTripper{
+			base:        rt,
+			clock:       systemClock{},
+			credentials: awsCfg.Credentials,
+			region:      region,
+			service:     service,
+			signer:      v4.NewSigner(),
+		}
 	}
-
-	return &transport{
-		Base:        base,
-		Clock:       systemClock{},
-		Credentials: provider,
-		Logger:      options.Logger,
-		Metadata:    cfg.Metadata,
-		Profile:     cfg.Profile,
-		Region:      cfg.Region,
-		Retries:     cfg.Retries,
-		Service:     cfg.Service,
-		Signer:      v4.NewSigner(),
-		SkipAuth:    cfg.SkipAuth,
-		UserAgent:   userAgent(options, cfg.DisableTelemetry),
-	}, nil
+	if agent := userAgent(options, cfg.DisableTelemetry); agent != "" {
+		rt = userAgentRoundTripper{base: rt, userAgent: agent}
+	}
+	return rt, nil
 }
 
-func firstLogger(loggers []*slog.Logger) *slog.Logger {
-	if len(loggers) == 0 {
-		return nil
-	}
-	return loggers[0]
-}
-
-func userAgent(options clientOptions, disableTelemetry bool) string {
+func userAgent(options clientOptions, disableTelemetry *bool) string {
 	version := options.Version
 	if version == "" {
 		version = "dev"
 	}
 	agent := "go/" + runtime.Version() + " aws-mcp-proxy/" + sanitizeUserAgentToken(version)
-	if disableTelemetry || options.ClientName == "" || options.ClientVersion == "" {
+	if enabled(disableTelemetry) || options.ClientName == "" || options.ClientVersion == "" {
 		return agent
 	}
 	return agent + " " + sanitizeClientName(options.ClientName) + "/" + sanitizeUserAgentToken(options.ClientVersion)
@@ -203,12 +158,12 @@ func sanitizeUserAgentToken(value string) string {
 	return value
 }
 
-func loadAWSConfig(ctx context.Context, cfg httpConfig, caBundle []byte) (aws.Config, error) {
+func loadAWSConfig(ctx context.Context, cfg Config, caBundle []byte) (aws.Config, error) {
 	options := []func(*config.LoadOptions) error{
-		config.WithRegion(cfg.Region),
+		config.WithRegion(value(cfg.Region)),
 	}
-	if cfg.Profile != "" {
-		options = append(options, config.WithSharedConfigProfile(cfg.Profile))
+	if profile := defaultProfile(cfg.Profiles); profile != nil {
+		options = append(options, config.WithSharedConfigProfile(*profile))
 	}
 	if len(caBundle) > 0 {
 		options = append(options, config.WithCustomCABundle(bytes.NewReader(caBundle)))
@@ -216,51 +171,63 @@ func loadAWSConfig(ctx context.Context, cfg httpConfig, caBundle []byte) (aws.Co
 	return config.LoadDefaultConfig(ctx, options...)
 }
 
-func baseTransport(client *http.Client) http.RoundTripper {
+func baseRoundTripper(client *http.Client) http.RoundTripper {
 	if client != nil && client.Transport != nil {
 		return client.Transport
 	}
 	return http.DefaultTransport
 }
 
-func hasTransportTimeouts(cfg httpConfig) bool {
-	return cfg.ConnectTimeout > 0 || cfg.ReadTimeout > 0 || cfg.WriteTimeout > 0
+func hasTransportTimeouts(cfg Config) bool {
+	return positiveDuration(cfg.ConnectTimeout) || positiveDuration(cfg.ReadTimeout) || positiveDuration(cfg.WriteTimeout)
 }
 
-func transportWithTimeouts(base http.RoundTripper, cfg httpConfig) (http.RoundTripper, error) {
+func roundTripperWithTimeouts(base http.RoundTripper, cfg Config) (http.RoundTripper, error) {
 	transport, ok := base.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("timeouts require an *http.Transport base, got %T", base)
 	}
 
 	cloned := transport.Clone()
-	if cfg.ConnectTimeout > 0 {
-		cloned.TLSHandshakeTimeout = cfg.ConnectTimeout
-	}
-	if cfg.ReadTimeout > 0 {
-		cloned.ResponseHeaderTimeout = cfg.ReadTimeout
-	}
-	if cfg.WriteTimeout > 0 {
-		cloned.ExpectContinueTimeout = cfg.WriteTimeout
-	}
-	cloned.DialContext = timeoutDialContext(cloned.DialContext, cfg)
-	if cloned.DialTLSContext != nil {
-		cloned.DialTLSContext = timeoutDialContext(cloned.DialTLSContext, cfg)
+	applyHTTPTransportTimeouts(cloned, cfg)
+	if hasConnectionDeadlines(cfg) {
+		applyConnectionDeadlines(cloned, cfg)
 	}
 
 	return cloned, nil
 }
 
-func timeoutDialContext(dial func(context.Context, string, string) (net.Conn, error), cfg httpConfig) func(context.Context, string, string) (net.Conn, error) {
+func applyHTTPTransportTimeouts(transport *http.Transport, cfg Config) {
+	if positiveDuration(cfg.ConnectTimeout) {
+		transport.TLSHandshakeTimeout = *cfg.ConnectTimeout
+	}
+	if positiveDuration(cfg.ReadTimeout) {
+		transport.ResponseHeaderTimeout = *cfg.ReadTimeout
+	}
+}
+
+func hasConnectionDeadlines(cfg Config) bool {
+	return positiveDuration(cfg.ConnectTimeout) || positiveDuration(cfg.ReadTimeout) || positiveDuration(cfg.WriteTimeout)
+}
+
+func applyConnectionDeadlines(transport *http.Transport, cfg Config) {
+	transport.DialContext = deadlineDialContext(transport.DialContext, cfg)
+	if transport.DialTLSContext != nil {
+		transport.DialTLSContext = deadlineDialContext(transport.DialTLSContext, cfg)
+	}
+	transport.ForceAttemptHTTP2 = true
+}
+
+func deadlineDialContext(dial func(context.Context, string, string) (net.Conn, error), cfg Config) func(context.Context, string, string) (net.Conn, error) {
 	if dial == nil {
-		dialer := &net.Dialer{Timeout: cfg.ConnectTimeout}
+		dialer := &net.Dialer{Timeout: value(cfg.ConnectTimeout)}
 		dial = dialer.DialContext
 	}
 
 	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		if cfg.ConnectTimeout > 0 {
+		if positiveDuration(cfg.ConnectTimeout) {
 			var cancel context.CancelFunc
-			ctx, cancel = context.WithTimeout(ctx, cfg.ConnectTimeout)
+			ctx, cancel = context.WithTimeout(ctx, *cfg.ConnectTimeout)
 			defer cancel()
 		}
 
@@ -268,13 +235,13 @@ func timeoutDialContext(dial func(context.Context, string, string) (net.Conn, er
 		if err != nil {
 			return nil, err
 		}
-		if cfg.ReadTimeout <= 0 && cfg.WriteTimeout <= 0 {
+		if !positiveDuration(cfg.ReadTimeout) && !positiveDuration(cfg.WriteTimeout) {
 			return conn, nil
 		}
 		return &deadlineConn{
 			Conn:         conn,
-			readTimeout:  cfg.ReadTimeout,
-			writeTimeout: cfg.WriteTimeout,
+			readTimeout:  value(cfg.ReadTimeout),
+			writeTimeout: value(cfg.WriteTimeout),
 		}, nil
 	}
 }
@@ -287,7 +254,7 @@ func readCABundle(path string) ([]byte, error) {
 	return bundle, nil
 }
 
-func transportWithCABundle(base http.RoundTripper, path string, bundle []byte) (http.RoundTripper, error) {
+func roundTripperWithCABundle(base http.RoundTripper, path string, bundle []byte) (http.RoundTripper, error) {
 	transport, ok := base.(*http.Transport)
 	if !ok {
 		return nil, fmt.Errorf("CA bundle %q requires an *http.Transport base, got %T", path, base)
@@ -315,6 +282,30 @@ func transportWithCABundle(base http.RoundTripper, path string, bundle []byte) (
 	return cloned, nil
 }
 
+func required[T any](ptr *T, name string) (T, error) {
+	if ptr == nil {
+		var zero T
+		return zero, fmt.Errorf("%s is required", name)
+	}
+	return *ptr, nil
+}
+
+func value[T any](ptr *T) T {
+	if ptr == nil {
+		var zero T
+		return zero
+	}
+	return *ptr
+}
+
+func enabled(ptr *bool) bool {
+	return ptr != nil && *ptr
+}
+
+func positiveDuration(ptr *time.Duration) bool {
+	return ptr != nil && *ptr > 0
+}
+
 type deadlineConn struct {
 	net.Conn
 	readTimeout  time.Duration
@@ -335,159 +326,42 @@ func (c *deadlineConn) Write(b []byte) (int, error) {
 	return c.Conn.Write(b)
 }
 
-func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
-	base := t.Base
-	if base == nil {
-		base = http.DefaultTransport
+func (t userAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.userAgent == "" || req.Header.Get("User-Agent") != "" {
+		return t.base.RoundTrip(req)
 	}
+	clone := req.Clone(req.Context())
+	clone.Header.Set("User-Agent", t.userAgent)
+	return t.base.RoundTrip(clone)
+}
 
+func (t sigV4RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.credentials == nil {
+		return nil, fmt.Errorf("AWS credentials provider is not configured")
+	}
 	body, err := readBody(req)
 	if err != nil {
 		return nil, err
 	}
-	body = injectMetadata(body, t.Metadata)
-
-	maxRetries := t.Retries
-	for attempt := 0; ; attempt++ {
-		attemptReq := req.Clone(req.Context())
-		setBody(attemptReq, body)
-		t.applyHeaders(attemptReq)
-
-		if !t.SkipAuth {
-			if t.Credentials == nil {
-				return nil, fmt.Errorf("AWS credentials provider is not configured")
-			}
-			credentials, err := t.Credentials.Retrieve(req.Context())
-			if err != nil {
-				return nil, fmt.Errorf("retrieve AWS credentials: %w", err)
-			}
-			if err := t.sign(attemptReq, body, credentials); err != nil {
-				return nil, err
-			}
-		}
-
-		start := time.Now()
-		resp, err := base.RoundTrip(attemptReq)
-		duration := time.Since(start)
-		t.logRequest(attemptReq, resp, err, attempt, duration)
-		if !t.shouldRetry(req.Context(), resp, err, attempt, maxRetries) {
-			return resp, err
-		}
-
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
-		t.logRetry(attemptReq, resp, err, attempt)
-		if err := waitForRetry(req.Context(), t.retryDelay(attempt)); err != nil {
-			return nil, err
-		}
-	}
-}
-
-func (t *transport) applyHeaders(req *http.Request) {
-	if t.UserAgent != "" && req.Header.Get("User-Agent") == "" {
-		req.Header.Set("User-Agent", t.UserAgent)
-	}
-}
-
-func (t *transport) shouldRetry(ctx context.Context, resp *http.Response, err error, attempt, maxRetries int) bool {
-	if maxRetries <= 0 || attempt >= maxRetries || ctx.Err() != nil {
-		return false
-	}
+	credentials, err := t.credentials.Retrieve(req.Context())
 	if err != nil {
-		return true
+		return nil, fmt.Errorf("retrieve AWS credentials: %w", err)
 	}
-	return resp != nil && retryableStatus(resp.StatusCode)
+
+	clone := req.Clone(req.Context())
+	setBody(clone, body)
+	if err := t.sign(clone, body, credentials); err != nil {
+		return nil, err
+	}
+	return t.base.RoundTrip(clone)
 }
 
-func retryableStatus(status int) bool {
-	switch status {
-	case http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
-		return true
-	default:
-		return false
-	}
-}
-
-func (t *transport) retryDelay(attempt int) time.Duration {
-	if t.RetryDelay != nil {
-		return t.RetryDelay(attempt)
-	}
-	delay := 100 * time.Millisecond * (1 << attempt)
-	if delay > 2*time.Second {
-		return 2 * time.Second
-	}
-	return delay
-}
-
-func waitForRetry(ctx context.Context, delay time.Duration) error {
-	if delay <= 0 {
-		return nil
-	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func (t *transport) logRequest(req *http.Request, resp *http.Response, err error, attempt int, duration time.Duration) {
-	if t.Logger == nil {
-		return
-	}
-
-	attrs := []any{
-		"method", req.Method,
-		"host", req.URL.Host,
-		"path", req.URL.Path,
-		"duration_ms", duration.Milliseconds(),
-		"attempt", attempt,
-		"profile", t.Profile,
-	}
-	if resp != nil {
-		attrs = append(attrs, "status", resp.StatusCode)
-	}
-	if err != nil {
-		attrs = append(attrs, "error", err)
-		t.Logger.Warn("upstream HTTP request failed", attrs...)
-		return
-	}
-	if resp != nil && resp.StatusCode >= 400 {
-		t.Logger.Warn("upstream HTTP request returned error status", attrs...)
-		return
-	}
-	t.Logger.Debug("upstream HTTP request completed", append(attrs, "headers", sanitizedHeaders(req.Header))...)
-}
-
-func (t *transport) logRetry(req *http.Request, resp *http.Response, err error, attempt int) {
-	if t.Logger == nil {
-		return
-	}
-	attrs := []any{
-		"method", req.Method,
-		"host", req.URL.Host,
-		"path", req.URL.Path,
-		"attempt", attempt,
-		"next_attempt", attempt + 1,
-	}
-	if resp != nil {
-		attrs = append(attrs, "status", resp.StatusCode)
-	}
-	if err != nil {
-		attrs = append(attrs, "error", err)
-	}
-	t.Logger.Warn("retrying upstream HTTP request", attrs...)
-}
-
-func (t *transport) sign(req *http.Request, body []byte, credentials aws.Credentials) error {
-	signer := t.Signer
+func (t sigV4RoundTripper) sign(req *http.Request, body []byte, credentials aws.Credentials) error {
+	signer := t.signer
 	if signer == nil {
 		signer = v4.NewSigner()
 	}
-	clock := t.Clock
+	clock := t.clock
 	if clock == nil {
 		clock = systemClock{}
 	}
@@ -495,7 +369,7 @@ func (t *transport) sign(req *http.Request, body []byte, credentials aws.Credent
 	req.Header.Del("Connection")
 	hash := sha256.Sum256(body)
 	payloadHash := hex.EncodeToString(hash[:])
-	if err := signer.SignHTTP(req.Context(), credentials, req, payloadHash, t.Service, t.Region, clock.Now()); err != nil {
+	if err := signer.SignHTTP(req.Context(), credentials, req, payloadHash, t.service, t.region, clock.Now()); err != nil {
 		return fmt.Errorf("sign AWS request: %w", err)
 	}
 	return nil
@@ -520,64 +394,4 @@ func setBody(req *http.Request, body []byte) {
 	req.GetBody = func() (io.ReadCloser, error) {
 		return io.NopCloser(bytes.NewReader(body)), nil
 	}
-}
-
-func injectMetadata(body []byte, metadata map[string]string) []byte {
-	if len(body) == 0 || len(metadata) == 0 {
-		return body
-	}
-
-	var message map[string]any
-	if err := json.Unmarshal(body, &message); err != nil {
-		return body
-	}
-	if _, ok := message["jsonrpc"]; !ok {
-		return body
-	}
-
-	params, _ := message["params"].(map[string]any)
-	if params == nil {
-		params = map[string]any{}
-		message["params"] = params
-	}
-
-	existing, _ := params["_meta"].(map[string]any)
-	if existing == nil {
-		existing = map[string]any{}
-	}
-	meta := map[string]any{}
-	for key, value := range metadata {
-		meta[key] = value
-	}
-	for key, value := range existing {
-		meta[key] = value
-	}
-	params["_meta"] = meta
-
-	encoded, err := json.Marshal(message)
-	if err != nil {
-		return body
-	}
-	return encoded
-}
-
-func redactHeader(name, value string) string {
-	switch strings.ToLower(name) {
-	case "authorization", "x-amz-security-token", "x-amz-date":
-		return "[REDACTED]"
-	default:
-		return value
-	}
-}
-
-func sanitizedHeaders(headers http.Header) map[string][]string {
-	out := make(map[string][]string, len(headers))
-	for name, values := range headers {
-		redacted := make([]string, len(values))
-		for i, value := range values {
-			redacted[i] = redactHeader(name, value)
-		}
-		out[name] = redacted
-	}
-	return out
 }

@@ -19,7 +19,6 @@ import (
 const (
 	exitOK    = 0
 	exitError = 1
-	exitUsage = 2
 )
 
 type RunProxy func(context.Context, proxy.Config, *slog.Logger) error
@@ -37,28 +36,33 @@ type Options struct {
 type app struct {
 	Version kong.VersionFlag `help:"Print version information and exit."`
 
-	Endpoint string `arg:"" help:"SigV4 MCP endpoint URL."`
+	Endpoint *string `arg:"" help:"SigV4 MCP endpoint URL."`
 
-	Service  string   `help:"AWS service name for SigV4 signing. Inferred from endpoint when omitted."`
+	Service  *string  `help:"AWS service name for SigV4 signing. Inferred from endpoint when omitted."`
 	Profiles []string `name:"profile" env:"AWS_MCP_PROXY_PROFILES,AWS_PROFILE" help:"AWS profile(s) to use. First profile is the default." sep:" " placeholder:"PROFILE"`
-	Region   string   `help:"AWS region to sign. Inferred from endpoint or AWS_REGION when omitted."`
-	CaBundle string   `name:"ca-bundle" env:"AWS_CA_BUNDLE" help:"Path to a PEM certificate bundle to trust in addition to the system roots." placeholder:"PATH"`
+	Region   *string  `help:"AWS region to sign. Inferred from endpoint or AWS_REGION when omitted."`
+	CaBundle *string  `name:"ca-bundle" env:"AWS_CA_BUNDLE" help:"Path to a PEM certificate bundle to trust in addition to the system roots." placeholder:"PATH"`
 
 	Metadata map[string]string `help:"Metadata to inject into MCP requests as key=value pairs." mapsep:"none" placeholder:"KEY=VALUE"`
 
-	ReadOnly bool `name:"read-only" help:"Disable tools that do not advertise readOnlyHint=true."`
+	ReadOnly *bool `name:"read-only" help:"Disable tools that do not advertise readOnlyHint=true."`
 
-	LogLevel string `name:"log-level" default:"ERROR" enum:"DEBUG,INFO,WARNING,ERROR,CRITICAL" help:"Set the logging level."`
-	Retries  int    `default:"0" help:"Number of retries when calling endpoint MCP. 0 disables retries."`
+	LogLevel *string `name:"log-level" enum:"DEBUG,INFO,WARNING,ERROR,CRITICAL" help:"Set the logging level."`
+	Retries  *int    `help:"Number of retries when calling endpoint MCP. Defaults to 3; 0 disables retries."`
 
-	Timeout        float64 `default:"180" help:"Total timeout in seconds when connecting to endpoint."`
-	ConnectTimeout float64 `name:"connect-timeout" default:"60" help:"Connection timeout in seconds."`
-	ReadTimeout    float64 `name:"read-timeout" default:"120" help:"Read timeout in seconds."`
-	WriteTimeout   float64 `name:"write-timeout" default:"180" help:"Write timeout in seconds."`
-	ToolTimeout    float64 `name:"tool-timeout" default:"300" help:"Maximum seconds a tool call may take before cancellation."`
+	Timeout        *float64 `help:"Total timeout in seconds when connecting to endpoint."`
+	ConnectTimeout *float64 `name:"connect-timeout" help:"Connection timeout in seconds."`
+	ReadTimeout    *float64 `name:"read-timeout" help:"Read timeout in seconds."`
+	WriteTimeout   *float64 `name:"write-timeout" help:"Write timeout in seconds."`
+	ToolTimeout    *float64 `name:"tool-timeout" help:"Maximum seconds a tool call may take before cancellation."`
 
-	DisableTelemetry bool `name:"disable-telemetry" help:"Disable client telemetry in outbound user-agent data."`
-	SkipAuth         bool `name:"skip-auth" help:"Send unsigned requests when AWS credentials are unavailable."`
+	DisableTelemetry *bool `name:"disable-telemetry" help:"Disable client telemetry in outbound user-agent data."`
+	SkipAuth         *bool `name:"skip-auth" help:"Send unsigned requests when AWS credentials are unavailable."`
+}
+
+func (a *app) Run(ctx context.Context, lookupEnv LookupEnv, runProxy RunProxy, stderr io.Writer) error {
+	cfg := a.config(lookupEnv)
+	return runProxy(ctx, cfg, newLogger(valueOr(a.LogLevel, "ERROR"), stderr))
 }
 
 func Run(ctx context.Context, args []string, options Options) int {
@@ -75,6 +79,9 @@ func Run(ctx context.Context, args []string, options Options) int {
 		kong.UsageOnError(),
 		kong.WithHyphenPrefixedParameters(true),
 		kong.Vars{"version": options.Version},
+		kong.Bind(options.LookupEnv, options.RunProxy),
+		kong.BindTo(ctx, (*context.Context)(nil)),
+		kong.BindTo(options.Stderr, (*io.Writer)(nil)),
 		kong.Writers(options.Stdout, options.Stderr),
 		kong.Exit(func(code int) {
 			exitCode = code
@@ -86,16 +93,15 @@ func Run(ctx context.Context, args []string, options Options) int {
 		return exitError
 	}
 
-	_, err = parser.Parse(args)
+	kctx, err := parser.Parse(args)
 	if exited {
 		return exitCode
 	}
 	if err != nil {
 		fmt.Fprintln(options.Stderr, err)
-		return exitUsage
+		return exitCodeForError(err)
 	}
-	cfg := application.config(options.LookupEnv)
-	if err := options.RunProxy(ctx, cfg, newLogger(cfg.LogLevel, options.Stderr)); err != nil {
+	if err := kctx.Run(); err != nil {
 		fmt.Fprintln(options.Stderr, err)
 		return exitCodeForError(err)
 	}
@@ -106,7 +112,7 @@ func Run(ctx context.Context, args []string, options Options) int {
 func exitCodeForError(err error) int {
 	var parseErr *kong.ParseError
 	if errors.As(err, &parseErr) {
-		return exitUsage
+		return parseErr.ExitCode()
 	}
 	return exitError
 }
@@ -139,25 +145,28 @@ func (a app) config(lookupEnv LookupEnv) proxy.Config {
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
 	}
-	endpointService, endpointRegion := serviceNameAndRegionFromEndpoint(a.Endpoint)
+
+	endpoint := value(a.Endpoint)
+	endpointService, endpointRegion := serviceNameAndRegionFromEndpoint(endpoint)
 	service := a.Service
-	if service == "" {
-		service = endpointService
+	if service == nil && endpointService != "" {
+		service = new(endpointService)
 	}
 	region := a.Region
-	if region == "" {
-		region = endpointRegion
+	if region == nil && endpointRegion != "" {
+		region = new(endpointRegion)
 	}
-	if region == "" {
-		region, _ = lookupEnv("AWS_REGION")
+	if region == nil {
+		if value, ok := lookupEnv("AWS_REGION"); ok {
+			region = new(value)
+		}
 	}
-	return proxy.Config{
+
+	cfg := proxy.Config{
 		Endpoint:         a.Endpoint,
 		Service:          service,
-		Profiles:         dedupe(a.Profiles),
 		Region:           region,
 		CaBundle:         a.CaBundle,
-		Metadata:         a.Metadata,
 		ReadOnly:         a.ReadOnly,
 		LogLevel:         a.LogLevel,
 		Retries:          a.Retries,
@@ -169,6 +178,36 @@ func (a app) config(lookupEnv LookupEnv) proxy.Config {
 		DisableTelemetry: a.DisableTelemetry,
 		SkipAuth:         a.SkipAuth,
 	}
+	profiles := dedupe(a.Profiles)
+	if len(profiles) > 0 {
+		cfg.Profiles = new(profiles)
+	}
+	if len(a.Metadata) > 0 {
+		cfg.Metadata = new(a.Metadata)
+	}
+	return cfg
+}
+
+func value[T any](ptr *T) T {
+	if ptr == nil {
+		var zero T
+		return zero
+	}
+	return *ptr
+}
+
+func valueOr[T any](ptr *T, fallback T) T {
+	if ptr == nil {
+		return fallback
+	}
+	return *ptr
+}
+
+func seconds(value *float64) *time.Duration {
+	if value == nil {
+		return nil
+	}
+	return new(time.Duration(*value * float64(time.Second)))
 }
 
 func dedupe(values []string) []string {
@@ -208,10 +247,6 @@ func serviceNameAndRegionFromEndpoint(endpoint string) (string, string) {
 		return parts[0], ""
 	}
 	return "", ""
-}
-
-func seconds(value float64) time.Duration {
-	return time.Duration(value * float64(time.Second))
 }
 
 func newLogger(levelName string, w io.Writer) *slog.Logger {
