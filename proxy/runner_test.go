@@ -32,8 +32,9 @@ func (c *fakeConnector) Connect(_ context.Context, cfg Config, params *mcp.Initi
 	if c.err != nil {
 		return nil, c.err
 	}
-	if len(cfg.Profiles) > 0 && c.sessionsByProfile != nil {
-		if sess := c.sessionsByProfile[cfg.Profiles[0]]; sess != nil {
+	profiles := value(cfg.Profiles)
+	if len(profiles) > 0 && c.sessionsByProfile != nil {
+		if sess := c.sessionsByProfile[profiles[0]]; sess != nil {
 			return sess, nil
 		}
 	}
@@ -44,19 +45,27 @@ type fakeSession struct {
 	closed             bool
 	result             *mcp.InitializeResult
 	tools              []*mcp.Tool
+	listCount          int
+	listErrs           []error
+	callCount          int
 	callName           string
 	callArgs           any
 	callErr            error
+	callErrs           []error
 	callResult         *mcp.CallToolResult
 	waitForContextDone bool
 }
 
 func (s *fakeSession) CallTool(ctx context.Context, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	s.callCount++
 	s.callName = params.Name
 	s.callArgs = params.Arguments
 	if s.waitForContextDone {
 		<-ctx.Done()
 		return nil, ctx.Err()
+	}
+	if index := s.callCount - 1; index < len(s.callErrs) && s.callErrs[index] != nil {
+		return nil, s.callErrs[index]
 	}
 	if s.callErr != nil {
 		return nil, s.callErr
@@ -79,6 +88,10 @@ func (s *fakeSession) InitializeResult() *mcp.InitializeResult {
 }
 
 func (s *fakeSession) ListTools(context.Context, *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+	s.listCount++
+	if index := s.listCount - 1; index < len(s.listErrs) && s.listErrs[index] != nil {
+		return nil, s.listErrs[index]
+	}
 	return &mcp.ListToolsResult{Tools: s.tools}, nil
 }
 
@@ -112,7 +125,7 @@ func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- Run(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, options)
+		errs <- Run(ctx, Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -124,8 +137,8 @@ func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
 	if !connector.called {
 		t.Fatal("upstream connector was not called")
 	}
-	if connector.cfg.Endpoint != "https://service.us-east-1.api.aws/mcp" {
-		t.Fatalf("connector endpoint = %q", connector.cfg.Endpoint)
+	if connector.cfg.Endpoint == nil || *connector.cfg.Endpoint != "https://service.us-east-1.api.aws/mcp" {
+		t.Fatalf("connector endpoint = %#v", connector.cfg.Endpoint)
 	}
 	if connector.params == nil || connector.params.ClientInfo == nil {
 		t.Fatalf("connector initialize params = %#v", connector.params)
@@ -186,8 +199,8 @@ func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
 
 	run := proxyRun{
 		config: Config{
-			Endpoint: server.URL,
-			SkipAuth: true,
+			Endpoint: new(server.URL),
+			SkipAuth: new(true),
 		},
 		httpClient: client,
 		version:    "test-version",
@@ -207,6 +220,69 @@ func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
 	}
 	if !sawCustomClient.Load() {
 		t.Fatal("upstream did not receive a request through the custom HTTP client")
+	}
+}
+
+func TestDefaultConnectorRetriesInitialize(t *testing.T) {
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return upstream
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, "temporary failure", http.StatusServiceUnavailable)
+			return
+		}
+		handler.ServeHTTP(w, req)
+	}))
+	t.Cleanup(server.Close)
+
+	session, err := mcpUpstreamConnector{}.Connect(t.Context(), Config{
+		Endpoint: new(server.URL),
+		Retries:  new(1),
+		SkipAuth: new(true),
+	}, &mcp.InitializeParams{
+		ClientInfo: &mcp.Implementation{Name: "test-client", Version: "1.0.0"},
+	})
+	if err != nil {
+		t.Fatalf("Connect() error = %v", err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatalf("session.Close() error = %v", err)
+	}
+	if requests.Load() < 2 {
+		t.Fatalf("upstream requests = %d, want at least 2", requests.Load())
+	}
+}
+
+func TestDefaultConnectorRequiresEndpoint(t *testing.T) {
+	_, err := mcpUpstreamConnector{}.Connect(t.Context(), Config{
+		SkipAuth: new(true),
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "endpoint is required") {
+		t.Fatalf("Connect() error = %v, want endpoint required", err)
+	}
+}
+
+func TestRegisterUpstreamToolsRetriesListTools(t *testing.T) {
+	upstream := &fakeSession{
+		listErrs: []error{errors.New("temporary tools/list failure")},
+		tools:    []*mcp.Tool{{Name: "aws___search_documentation", InputSchema: map[string]any{"type": "object"}}},
+	}
+	run := proxyRun{
+		config: Config{
+			Retries: new(1),
+		},
+		server: mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "test"}, nil),
+	}
+
+	if err := run.registerUpstreamTools(t.Context(), upstream); err != nil {
+		t.Fatalf("registerUpstreamTools() error = %v", err)
+	}
+	if upstream.listCount != 2 {
+		t.Fatalf("ListTools count = %d, want 2", upstream.listCount)
 	}
 }
 
@@ -240,8 +316,8 @@ func TestRunRegistersAndForwardsUpstreamTools(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() {
 		errs <- Run(ctx, Config{
-			Endpoint:    "https://service.us-east-1.api.aws/mcp",
-			ToolTimeout: 5 * time.Second,
+			Endpoint:    new("https://service.us-east-1.api.aws/mcp"),
+			ToolTimeout: new(5 * time.Second),
 		}, options)
 	}()
 
@@ -311,8 +387,8 @@ func TestRunInjectsAWSProfileIntoAuthToolSchema(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() {
 		errs <- Run(ctx, Config{
-			Endpoint: "https://service.us-east-1.api.aws/mcp",
-			Profiles: []string{"default", "dev"},
+			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Profiles: new([]string{"default", "dev"}),
 		}, options)
 	}()
 
@@ -373,8 +449,8 @@ func TestRunRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() {
 		errs <- Run(ctx, Config{
-			Endpoint: "https://service.us-east-1.api.aws/mcp",
-			Profiles: []string{"default", "dev"},
+			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Profiles: new([]string{"default", "dev"}),
 		}, options)
 	}()
 
@@ -410,7 +486,7 @@ func TestRunRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
 	if _, ok := args["aws_profile"]; ok {
 		t.Fatalf("aws_profile was forwarded: %#v", args)
 	}
-	if len(connector.configs) != 2 || strings.Join(connector.configs[1].Profiles, ",") != "dev" {
+	if len(connector.configs) != 2 || strings.Join(value(connector.configs[1].Profiles), ",") != "dev" {
 		t.Fatalf("connector configs = %#v", connector.configs)
 	}
 
@@ -438,8 +514,8 @@ func TestRunRoutesDefaultAWSProfileThroughDefaultSession(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() {
 		errs <- Run(ctx, Config{
-			Endpoint: "https://service.us-east-1.api.aws/mcp",
-			Profiles: []string{"default", "dev"},
+			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Profiles: new([]string{"default", "dev"}),
 		}, options)
 	}()
 
@@ -476,6 +552,67 @@ func TestRunRoutesDefaultAWSProfileThroughDefaultSession(t *testing.T) {
 	waitForProxyRunExit(t, ctx, errs)
 }
 
+func TestCallSessionToolRetriesTransientErrors(t *testing.T) {
+	session := &fakeSession{
+		callErrs: []error{errors.New("temporary failure")},
+		callResult: &mcp.CallToolResult{
+			Content: []mcp.Content{&mcp.TextContent{Text: "retried"}},
+		},
+	}
+	run := proxyRun{
+		config: Config{
+			Retries: new(1),
+		},
+	}
+
+	result, err := run.callSessionTool(t.Context(), session, &mcp.CallToolParams{Name: "aws___call_aws"})
+	if err != nil {
+		t.Fatalf("callSessionTool() error = %v", err)
+	}
+	if session.callCount != 2 {
+		t.Fatalf("CallTool count = %d, want 2", session.callCount)
+	}
+	text, ok := result.Content[0].(*mcp.TextContent)
+	if !ok || text.Text != "retried" {
+		t.Fatalf("result content = %#v", result.Content)
+	}
+}
+
+func TestRetryCountDefaultsToThreeAndAllowsDisable(t *testing.T) {
+	if got := retryCount(nil); got != 3 {
+		t.Fatalf("retryCount(nil) = %d, want 3", got)
+	}
+	if got := retryCount(new(0)); got != 0 {
+		t.Fatalf("retryCount(0) = %d, want 0", got)
+	}
+}
+
+func TestMetadataMiddlewareAddsRequestMetadata(t *testing.T) {
+	handler := metadataMiddleware(map[string]string{
+		"AWS_REGION": "us-east-1",
+		"team":       "platform",
+	})(func(_ context.Context, _ string, req mcp.Request) (mcp.Result, error) {
+		params := req.GetParams().(*mcp.CallToolParams)
+		if params.Meta["AWS_REGION"] != "us-east-1" {
+			t.Fatalf("AWS_REGION metadata = %#v", params.Meta["AWS_REGION"])
+		}
+		if params.Meta["team"] != "client" {
+			t.Fatalf("team metadata = %#v", params.Meta["team"])
+		}
+		return nil, nil
+	})
+
+	params := &mcp.CallToolParams{
+		Name: "aws___call_aws",
+		Meta: mcp.Meta{
+			"team": "client",
+		},
+	}
+	if _, err := handler(t.Context(), "tools/call", &mcp.ClientRequest[*mcp.CallToolParams]{Params: params}); err != nil {
+		t.Fatalf("metadata middleware handler error = %v", err)
+	}
+}
+
 func TestRunRejectsDisallowedAWSProfile(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{
@@ -490,8 +627,8 @@ func TestRunRejectsDisallowedAWSProfile(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() {
 		errs <- Run(ctx, Config{
-			Endpoint: "https://service.us-east-1.api.aws/mcp",
-			Profiles: []string{"default", "dev"},
+			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Profiles: new([]string{"default", "dev"}),
 		}, options)
 	}()
 
@@ -537,8 +674,8 @@ func TestRunStripsAWSProfileFromNonAuthTool(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() {
 		errs <- Run(ctx, Config{
-			Endpoint: "https://service.us-east-1.api.aws/mcp",
-			Profiles: []string{"default", "dev"},
+			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Profiles: new([]string{"default", "dev"}),
 		}, options)
 	}()
 
@@ -608,8 +745,8 @@ func TestRunFiltersReadOnlyTools(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() {
 		errs <- Run(ctx, Config{
-			Endpoint: "https://service.us-east-1.api.aws/mcp",
-			ReadOnly: true,
+			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			ReadOnly: new(true),
 		}, options)
 	}()
 
@@ -651,7 +788,7 @@ func TestRunReturnsToolVisibleErrorOnUpstreamCallFailure(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- Run(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, options)
+		errs <- Run(ctx, Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
@@ -702,8 +839,8 @@ func TestRunAppliesToolTimeout(t *testing.T) {
 	errs := make(chan error, 1)
 	go func() {
 		errs <- Run(ctx, Config{
-			Endpoint:    "https://service.us-east-1.api.aws/mcp",
-			ToolTimeout: time.Millisecond,
+			Endpoint:    new("https://service.us-east-1.api.aws/mcp"),
+			ToolTimeout: new(time.Millisecond),
 		}, options)
 	}()
 
@@ -746,7 +883,7 @@ func TestRunReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- Run(ctx, Config{Endpoint: "https://service.us-east-1.api.aws/mcp"}, options)
+		errs <- Run(ctx, Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)

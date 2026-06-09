@@ -9,9 +9,9 @@
 // A minimal embedded proxy run looks like:
 //
 //	err := proxy.Run(ctx, proxy.Config{
-//		Endpoint: "https://service.us-east-1.api.aws/mcp",
-//		Region:   "us-east-1",
-//		Service:  "service",
+//		Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+//		Region:   new("us-east-1"),
+//		Service:  new("service"),
 //	}, proxy.RunOptions{
 //		Logger: logger,
 //	})

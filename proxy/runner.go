@@ -145,7 +145,7 @@ func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 }
 
 func (r *proxyRun) registerUpstreamTools(ctx context.Context, upstream UpstreamSession) error {
-	result, err := upstream.ListTools(ctx, &mcp.ListToolsParams{})
+	result, err := r.listUpstreamTools(ctx, upstream)
 	if err != nil {
 		return err
 	}
@@ -153,13 +153,33 @@ func (r *proxyRun) registerUpstreamTools(ctx context.Context, upstream UpstreamS
 		return nil
 	}
 
-	for _, tool := range filterTools(result.Tools, r.config.ReadOnly) {
+	readOnly := enabled(r.config.ReadOnly)
+	for _, tool := range filterTools(result.Tools, readOnly) {
 		r.registerTool(tool, upstream)
 	}
 	if r.logger != nil {
-		r.logger.Info("registered upstream tools", "count", len(result.Tools), "read_only", r.config.ReadOnly)
+		r.logger.Info("registered upstream tools", "count", len(result.Tools), "read_only", readOnly)
 	}
 	return nil
+}
+
+func (r *proxyRun) listUpstreamTools(ctx context.Context, upstream UpstreamSession) (*mcp.ListToolsResult, error) {
+	retries := retryCount(r.config.Retries)
+	for attempt := 0; ; attempt++ {
+		result, err := upstream.ListTools(ctx, &mcp.ListToolsParams{})
+		if err == nil {
+			return result, nil
+		}
+		if !shouldRetry(ctx, attempt, retries) {
+			return nil, err
+		}
+		if r.logger != nil {
+			r.logger.Warn("retrying upstream tools/list", "attempt", attempt, "next_attempt", attempt+1, "error", err)
+		}
+		if err := waitForRetry(ctx, retryDelay(attempt)); err != nil {
+			return nil, err
+		}
+	}
 }
 
 func (r *proxyRun) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
@@ -169,8 +189,9 @@ func (r *proxyRun) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 
 	localTool := cloneTool(tool)
 	localTool.InputSchema = normalizedInputSchema(localTool.InputSchema)
-	if len(r.config.Profiles) > 0 && authRequiringTool(localTool.Name) {
-		localTool.InputSchema = inputSchemaWithProfile(localTool.InputSchema, r.config.Profiles)
+	profiles := value(r.config.Profiles)
+	if len(profiles) > 0 && authRequiringTool(localTool.Name) {
+		localTool.InputSchema = inputSchemaWithProfile(localTool.InputSchema, profiles)
 	}
 	if localTool.OutputSchema != nil && !schemaIsObject(localTool.OutputSchema) {
 		localTool.OutputSchema = nil
@@ -180,8 +201,8 @@ func (r *proxyRun) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 		start := time.Now()
 		callCtx := ctx
 		cancel := func() {}
-		if r.config.ToolTimeout > 0 {
-			callCtx, cancel = context.WithTimeout(ctx, r.config.ToolTimeout)
+		if positiveDuration(r.config.ToolTimeout) {
+			callCtx, cancel = context.WithTimeout(ctx, *r.config.ToolTimeout)
 		}
 		defer cancel()
 
@@ -205,7 +226,7 @@ func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSessio
 		return nil, err
 	}
 	if profile == "" {
-		return upstream.CallTool(ctx, &mcp.CallToolParams{
+		return r.callSessionTool(ctx, upstream, &mcp.CallToolParams{
 			Name:      req.Params.Name,
 			Arguments: rawArguments(req.Params.Arguments),
 		})
@@ -215,17 +236,19 @@ func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSessio
 		if r.logger != nil {
 			r.logger.Warn("ignoring aws_profile on non-auth tool", "tool", req.Params.Name)
 		}
-		return upstream.CallTool(ctx, &mcp.CallToolParams{
+		return r.callSessionTool(ctx, upstream, &mcp.CallToolParams{
 			Name:      req.Params.Name,
 			Arguments: args,
 		})
 	}
 
-	if !allowedProfile(profile, r.config.Profiles) {
-		return nil, fmt.Errorf("profile %q is not in the allowed list; allowed profiles: %s", profile, profileList(r.config.Profiles))
+	profiles := value(r.config.Profiles)
+	if !allowedProfile(profile, profiles) {
+		return nil, fmt.Errorf("profile %q is not in the allowed list; allowed profiles: %s", profile, profileList(profiles))
 	}
-	if profile == defaultProfile(r.config.Profiles) {
-		return upstream.CallTool(ctx, &mcp.CallToolParams{
+	defaultProfile := defaultProfile(r.config.Profiles)
+	if defaultProfile != nil && profile == *defaultProfile {
+		return r.callSessionTool(ctx, upstream, &mcp.CallToolParams{
 			Name:      req.Params.Name,
 			Arguments: args,
 		})
@@ -238,16 +261,68 @@ func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSessio
 	if r.logger != nil {
 		r.logger.Info("routing tool call through profile override", "tool", req.Params.Name, "profile", profile)
 	}
-	return session.CallTool(ctx, &mcp.CallToolParams{
+	return r.callSessionTool(ctx, session, &mcp.CallToolParams{
 		Name:      req.Params.Name,
 		Arguments: args,
 	})
 }
 
+func (r *proxyRun) callSessionTool(ctx context.Context, session UpstreamSession, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
+	retries := retryCount(r.config.Retries)
+	for attempt := 0; ; attempt++ {
+		result, err := session.CallTool(ctx, params)
+		if err == nil {
+			return result, nil
+		}
+		if !shouldRetry(ctx, attempt, retries) {
+			return nil, err
+		}
+		if r.logger != nil {
+			r.logger.Warn("retrying upstream tool call", "tool", params.Name, "attempt", attempt, "next_attempt", attempt+1, "error", err)
+		}
+		if err := waitForRetry(ctx, retryDelay(attempt)); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func retryCount(retries *int) int {
+	if retries == nil {
+		return 3
+	}
+	return *retries
+}
+
+func shouldRetry(ctx context.Context, attempt, retries int) bool {
+	return retries > 0 && attempt < retries && ctx.Err() == nil
+}
+
+func retryDelay(attempt int) time.Duration {
+	delay := 100 * time.Millisecond * (1 << attempt)
+	if delay > 2*time.Second {
+		return 2 * time.Second
+	}
+	return delay
+}
+
+func waitForRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (r *proxyRun) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
 	connector := r.connector
 	if connector == nil {
-		connector = mcpUpstreamConnector{HTTPClient: r.httpClient, Logger: r.logger, Version: r.version}
+		connector = mcpUpstreamConnector{HTTPClient: r.httpClient, Version: r.version}
 	}
 
 	session, err := connector.Connect(ctx, r.config, params)
@@ -414,11 +489,11 @@ func allowedProfile(profile string, profiles []string) bool {
 	return false
 }
 
-func defaultProfile(profiles []string) string {
-	if len(profiles) == 0 {
-		return ""
+func defaultProfile(profiles *[]string) *string {
+	if profiles == nil || len(*profiles) == 0 {
+		return nil
 	}
-	return profiles[0]
+	return &(*profiles)[0]
 }
 
 func profileList(profiles []string) string {
@@ -443,7 +518,6 @@ func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
 
 type mcpUpstreamConnector struct {
 	HTTPClient *http.Client
-	Logger     *slog.Logger
 	Version    string
 }
 
@@ -453,14 +527,13 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 		version = "dev"
 	}
 	options := clientOptions{
-		Logger:  c.Logger,
 		Version: version,
 	}
 	if params != nil && params.ClientInfo != nil {
 		options.ClientName = params.ClientInfo.Name
 		options.ClientVersion = params.ClientInfo.Version
 	}
-	httpClient, err := newClientWithOptions(ctx, cfg.httpConfig(), c.HTTPClient, options)
+	httpClient, err := newClient(ctx, cfg, c.HTTPClient, options)
 	if err != nil {
 		return nil, err
 	}
@@ -470,11 +543,52 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 		Title:   defaultTitle,
 		Version: version,
 	}, nil)
+	if metadata := value(cfg.Metadata); len(metadata) > 0 {
+		client.AddSendingMiddleware(metadataMiddleware(metadata))
+	}
 
-	return client.Connect(ctx, &mcp.StreamableClientTransport{
-		Endpoint:   cfg.Endpoint,
-		HTTPClient: httpClient,
-	}, nil)
+	endpoint, err := required(cfg.Endpoint, "endpoint")
+	if err != nil {
+		return nil, err
+	}
+
+	retries := retryCount(cfg.Retries)
+	for attempt := 0; ; attempt++ {
+		session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
+			Endpoint:   endpoint,
+			HTTPClient: httpClient,
+		}, nil)
+		if err == nil {
+			return session, nil
+		}
+		if !shouldRetry(ctx, attempt, retries) {
+			return nil, err
+		}
+		if err := waitForRetry(ctx, retryDelay(attempt)); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func metadataMiddleware(metadata map[string]string) mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			params := req.GetParams()
+			if params == nil {
+				return next(ctx, method, req)
+			}
+			existing := params.GetMeta()
+			meta := make(map[string]any, len(metadata)+len(existing))
+			for key, value := range metadata {
+				meta[key] = value
+			}
+			for key, value := range existing {
+				meta[key] = value
+			}
+			params.SetMeta(meta)
+			return next(ctx, method, req)
+		}
+	}
 }
 
 type upstreamState struct {
@@ -535,10 +649,10 @@ func (s *profileSessions) Get(ctx context.Context, profile string, run *proxyRun
 	params := s.params
 
 	cfg := run.config
-	cfg.Profiles = []string{profile}
+	cfg.Profiles = &[]string{profile}
 	connector := run.connector
 	if connector == nil {
-		connector = mcpUpstreamConnector{HTTPClient: run.httpClient, Logger: run.logger, Version: run.version}
+		connector = mcpUpstreamConnector{HTTPClient: run.httpClient, Version: run.version}
 	}
 
 	session, err := connector.Connect(ctx, cfg, params)

@@ -3,10 +3,8 @@ package proxy
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"encoding/pem"
 	"io"
-	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -60,11 +58,16 @@ type captureRoundTripper struct {
 
 func (rt *captureRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	rt.request = req
-	body, err := io.ReadAll(req.Body)
-	if err != nil {
-		return nil, err
+	if req.Body != nil {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			return nil, err
+		}
+		if err := req.Body.Close(); err != nil {
+			return nil, err
+		}
+		rt.body = body
 	}
-	rt.body = body
 	return &http.Response{
 		StatusCode: http.StatusOK,
 		Body:       io.NopCloser(bytes.NewReader([]byte("{}"))),
@@ -73,7 +76,7 @@ func (rt *captureRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	}, nil
 }
 
-func TestTransportInjectsMetadataBeforeSigning(t *testing.T) {
+func TestSigningRoundTripperSignsClonedRequest(t *testing.T) {
 	base := &captureRoundTripper{}
 	creds := &staticCredentials{creds: aws.Credentials{
 		AccessKeyID:     "AKIA",
@@ -81,20 +84,16 @@ func TestTransportInjectsMetadataBeforeSigning(t *testing.T) {
 		Source:          "test",
 	}}
 	signer := &recordingSigner{}
-	transport := &transport{
-		Base:        base,
-		Clock:       fixedClock{},
-		Credentials: creds,
-		Metadata: map[string]string{
-			"AWS_REGION": "us-west-2",
-			"team":       "platform",
-		},
-		Region:  "us-east-1",
-		Service: "aws-mcp",
-		Signer:  signer,
+	transport := sigV4RoundTripper{
+		base:        base,
+		clock:       fixedClock{},
+		credentials: creds,
+		region:      "us-east-1",
+		service:     "aws-mcp",
+		signer:      signer,
 	}
 
-	req := newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{"_meta":{"team":"client"}}}`)
+	req := newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
 	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		t.Fatalf("RoundTrip() error = %v", err)
@@ -113,64 +112,14 @@ func TestTransportInjectsMetadataBeforeSigning(t *testing.T) {
 	if base.request.Header.Get("Authorization") != "signed" {
 		t.Fatalf("Authorization = %q", base.request.Header.Get("Authorization"))
 	}
-
-	var body map[string]any
-	if err := json.Unmarshal(base.body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
+	if base.request == req {
+		t.Fatal("signing RoundTripper passed the original request downstream")
 	}
-	params := body["params"].(map[string]any)
-	meta := params["_meta"].(map[string]any)
-	if meta["AWS_REGION"] != "us-west-2" {
-		t.Fatalf("AWS_REGION metadata = %#v", meta["AWS_REGION"])
+	if req.Header.Get("Authorization") != "" {
+		t.Fatalf("original request Authorization = %q, want empty", req.Header.Get("Authorization"))
 	}
-	if meta["team"] != "client" {
-		t.Fatalf("existing metadata was not preserved: %#v", meta)
-	}
-}
-
-func TestTransportSkipAuthStillInjectsMetadata(t *testing.T) {
-	base := &captureRoundTripper{}
-	creds := &staticCredentials{}
-	signer := &recordingSigner{}
-	transport := &transport{
-		Base:        base,
-		Credentials: creds,
-		Metadata:    map[string]string{"AWS_REGION": "us-east-1"},
-		Signer:      signer,
-		SkipAuth:    true,
-	}
-
-	req := newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
-	resp, err := transport.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip() error = %v", err)
-	}
-	resp.Body.Close()
-
-	if creds.called {
-		t.Fatal("credentials were retrieved with skip auth")
-	}
-	if signer.called {
-		t.Fatal("signer was called with skip auth")
-	}
-	var body map[string]any
-	if err := json.Unmarshal(base.body, &body); err != nil {
-		t.Fatalf("unmarshal body: %v", err)
-	}
-	params := body["params"].(map[string]any)
-	meta := params["_meta"].(map[string]any)
-	if meta["AWS_REGION"] != "us-east-1" {
-		t.Fatalf("metadata = %#v", meta)
-	}
-}
-
-func TestInjectMetadataLeavesNonJSONRPCBodyUnchanged(t *testing.T) {
-	body := []byte(`{"hello":"world"}`)
-
-	got := injectMetadata(body, map[string]string{"AWS_REGION": "us-east-1"})
-
-	if string(got) != string(body) {
-		t.Fatalf("body = %s", got)
+	if string(base.body) != `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}` {
+		t.Fatalf("downstream body = %s", base.body)
 	}
 }
 
@@ -183,10 +132,10 @@ func TestNewHTTPClientTrustsCABundle(t *testing.T) {
 	bundlePath := filepath.Join(t.TempDir(), "ca.pem")
 	writeCertificateBundle(t, bundlePath, server.Certificate().Raw)
 
-	client, err := newClient(context.Background(), httpConfig{
-		CaBundle: bundlePath,
-		SkipAuth: true,
-	}, nil)
+	client, err := newClient(t.Context(), Config{
+		CaBundle: new(bundlePath),
+		SkipAuth: new(true),
+	}, nil, clientOptions{})
 	if err != nil {
 		t.Fatalf("newClient() error = %v", err)
 	}
@@ -207,23 +156,39 @@ func TestNewHTTPTransportRejectsInvalidCABundle(t *testing.T) {
 		t.Fatalf("write bundle: %v", err)
 	}
 
-	_, err := newTransport(context.Background(), httpConfig{
-		CaBundle: bundlePath,
-		SkipAuth: true,
-	}, http.DefaultTransport)
+	_, err := newRoundTripper(t.Context(), Config{
+		CaBundle: new(bundlePath),
+		SkipAuth: new(true),
+	}, http.DefaultTransport, clientOptions{})
 	if err == nil {
-		t.Fatal("newTransport() error = nil")
+		t.Fatal("newRoundTripper() error = nil")
+	}
+}
+
+func TestNewHTTPTransportRequiresSigningConfigWhenAuthEnabled(t *testing.T) {
+	_, err := newRoundTripper(t.Context(), Config{
+		Region: new("us-east-1"),
+	}, http.DefaultTransport, clientOptions{})
+	if err == nil || !strings.Contains(err.Error(), "service is required") {
+		t.Fatalf("newRoundTripper() error = %v, want service required", err)
+	}
+
+	_, err = newRoundTripper(t.Context(), Config{
+		Service: new("aws-mcp"),
+	}, http.DefaultTransport, clientOptions{})
+	if err == nil || !strings.Contains(err.Error(), "region is required") {
+		t.Fatalf("newRoundTripper() error = %v, want region required", err)
 	}
 }
 
 func TestNewHTTPClientAppliesTimeouts(t *testing.T) {
-	client, err := newClient(context.Background(), httpConfig{
-		Timeout:        2 * time.Second,
-		ConnectTimeout: 3 * time.Second,
-		ReadTimeout:    4 * time.Second,
-		WriteTimeout:   5 * time.Second,
-		SkipAuth:       true,
-	}, nil)
+	client, err := newClient(t.Context(), Config{
+		Timeout:        new(2 * time.Second),
+		ConnectTimeout: new(3 * time.Second),
+		ReadTimeout:    new(4 * time.Second),
+		WriteTimeout:   new(5 * time.Second),
+		SkipAuth:       new(true),
+	}, nil, clientOptions{})
 	if err != nil {
 		t.Fatalf("newClient() error = %v", err)
 	}
@@ -231,13 +196,9 @@ func TestNewHTTPClientAppliesTimeouts(t *testing.T) {
 	if client.Timeout != 2*time.Second {
 		t.Fatalf("client.Timeout = %s", client.Timeout)
 	}
-	proxyTransport, ok := client.Transport.(*transport)
+	base, ok := findHTTPTransport(client.Transport)
 	if !ok {
-		t.Fatalf("client.Transport type = %T", client.Transport)
-	}
-	base, ok := proxyTransport.Base.(*http.Transport)
-	if !ok {
-		t.Fatalf("proxy base transport type = %T", proxyTransport.Base)
+		t.Fatalf("client.Transport type = %T, no *http.Transport found", client.Transport)
 	}
 	if base.TLSHandshakeTimeout != 3*time.Second {
 		t.Fatalf("TLSHandshakeTimeout = %s", base.TLSHandshakeTimeout)
@@ -245,84 +206,22 @@ func TestNewHTTPClientAppliesTimeouts(t *testing.T) {
 	if base.ResponseHeaderTimeout != 4*time.Second {
 		t.Fatalf("ResponseHeaderTimeout = %s", base.ResponseHeaderTimeout)
 	}
-	if base.ExpectContinueTimeout != 5*time.Second {
-		t.Fatalf("ExpectContinueTimeout = %s", base.ExpectContinueTimeout)
-	}
 	if base.DialContext == nil {
 		t.Fatal("DialContext was not configured")
 	}
 }
 
-func TestTransportRetriesTransientHTTPStatus(t *testing.T) {
-	base := &sequenceRoundTripper{
-		responses: []*http.Response{
-			responseWithStatus(http.StatusServiceUnavailable),
-			responseWithStatus(http.StatusOK),
-		},
-	}
-	var logs bytes.Buffer
-	transport := &transport{
-		Base:       base,
-		Logger:     slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		Retries:    1,
-		RetryDelay: func(int) time.Duration { return 0 },
-		SkipAuth:   true,
-	}
-
-	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
-	if err != nil {
-		t.Fatalf("RoundTrip() error = %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("StatusCode = %d", resp.StatusCode)
-	}
-	if base.calls != 2 {
-		t.Fatalf("calls = %d, want 2", base.calls)
-	}
-	if !strings.Contains(logs.String(), "retrying upstream HTTP request") {
-		t.Fatalf("logs = %q, want retry log", logs.String())
-	}
-}
-
-func TestTransportLogsRedactedHeaders(t *testing.T) {
-	base := &sequenceRoundTripper{responses: []*http.Response{responseWithStatus(http.StatusOK)}}
-	var logs bytes.Buffer
-	transport := &transport{
-		Base:     base,
-		Logger:   slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})),
-		SkipAuth: true,
-	}
-
-	req := newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
-	req.Header.Set("Authorization", "secret")
-	resp, err := transport.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip() error = %v", err)
-	}
-	resp.Body.Close()
-
-	logText := logs.String()
-	if !strings.Contains(logText, "[REDACTED]") {
-		t.Fatalf("logs = %q, want redacted header", logText)
-	}
-	if strings.Contains(logText, "secret") {
-		t.Fatalf("logs = %q, leaked secret", logText)
-	}
-}
-
 func TestTransportUserAgentIncludesClientInfoWhenTelemetryEnabled(t *testing.T) {
 	base := &captureRoundTripper{}
-	transport, err := newTransportWithOptions(context.Background(), httpConfig{
-		SkipAuth: true,
+	transport, err := newRoundTripper(t.Context(), Config{
+		SkipAuth: new(true),
 	}, base, clientOptions{
 		ClientName:    "My Client",
 		ClientVersion: "2.0",
 		Version:       "1.2.3",
 	})
 	if err != nil {
-		t.Fatalf("newTransportWithOptions() error = %v", err)
+		t.Fatalf("newRoundTripper() error = %v", err)
 	}
 
 	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
@@ -342,16 +241,16 @@ func TestTransportUserAgentIncludesClientInfoWhenTelemetryEnabled(t *testing.T) 
 
 func TestTransportUserAgentOmitsClientInfoWhenTelemetryDisabled(t *testing.T) {
 	base := &captureRoundTripper{}
-	transport, err := newTransportWithOptions(context.Background(), httpConfig{
-		DisableTelemetry: true,
-		SkipAuth:         true,
+	transport, err := newRoundTripper(t.Context(), Config{
+		DisableTelemetry: new(true),
+		SkipAuth:         new(true),
 	}, base, clientOptions{
 		ClientName:    "My Client",
 		ClientVersion: "2.0",
 		Version:       "1.2.3",
 	})
 	if err != nil {
-		t.Fatalf("newTransportWithOptions() error = %v", err)
+		t.Fatalf("newRoundTripper() error = %v", err)
 	}
 
 	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
@@ -395,45 +294,21 @@ func TestDeadlineConnAppliesReadAndWriteDeadlines(t *testing.T) {
 	}
 }
 
-func TestRedactHeader(t *testing.T) {
-	if got := redactHeader("Authorization", "secret"); got != "[REDACTED]" {
-		t.Fatalf("Authorization redaction = %q", got)
-	}
-	if got := redactHeader("Accept", "application/json"); got != "application/json" {
-		t.Fatalf("Accept redaction = %q", got)
-	}
-}
-
 type recordingConn struct {
 	readDeadline  time.Time
 	writeDeadline time.Time
 }
 
-type sequenceRoundTripper struct {
-	calls     int
-	responses []*http.Response
-	errs      []error
-}
-
-func (rt *sequenceRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	rt.calls++
-	index := rt.calls - 1
-	if index < len(rt.errs) && rt.errs[index] != nil {
-		return nil, rt.errs[index]
-	}
-	if index < len(rt.responses) {
-		resp := rt.responses[index]
-		resp.Request = req
-		return resp, nil
-	}
-	return responseWithStatus(http.StatusOK), nil
-}
-
-func responseWithStatus(status int) *http.Response {
-	return &http.Response{
-		StatusCode: status,
-		Body:       io.NopCloser(bytes.NewReader([]byte("{}"))),
-		Header:     make(http.Header),
+func findHTTPTransport(rt http.RoundTripper) (*http.Transport, bool) {
+	switch rt := rt.(type) {
+	case *http.Transport:
+		return rt, true
+	case userAgentRoundTripper:
+		return findHTTPTransport(rt.base)
+	case sigV4RoundTripper:
+		return findHTTPTransport(rt.base)
+	default:
+		return nil, false
 	}
 }
 
