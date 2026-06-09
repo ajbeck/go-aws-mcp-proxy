@@ -162,6 +162,9 @@ func smokeAWSMCP(args []string, stdout, stderr io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "AWS MCP smoke passed: listed %d tools and called aws___search_documentation\n", len(tools.Tools))
+	if text := firstTextContent(result.Content); text != "" {
+		fmt.Fprintf(stdout, "\n%s\n", text)
+	}
 	return nil
 }
 
@@ -182,6 +185,16 @@ func toolNames(tools []*mcp.Tool) string {
 		}
 	}
 	return strings.Join(names, ", ")
+}
+
+func firstTextContent(content []mcp.Content) string {
+	for _, item := range content {
+		text, ok := item.(*mcp.TextContent)
+		if ok {
+			return strings.TrimSpace(text.Text)
+		}
+	}
+	return ""
 }
 
 type stringList struct {

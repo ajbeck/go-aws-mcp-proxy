@@ -9,8 +9,9 @@ project keeps that value proposition, but targets enterprise-friendly
 distribution and operation by shipping a native binary instead of requiring a
 Python and `uv` runtime at agent startup.
 
-> Project status: initial scaffold. The current application entry point is not a
-> functional proxy yet.
+> Project status: early functional proxy. The current implementation can bridge
+> stdio MCP clients to remote Streamable HTTP AWS MCP endpoints, including a
+> live unsigned smoke test against the AWS documentation MCP endpoint.
 
 ## Why Rewrite It In Go?
 
@@ -87,10 +88,39 @@ Run the full local CI path:
 go run ./cmd/scripts ci
 ```
 
-Run the current scaffold:
+Run the proxy:
 
 ```bash
-go run ./cmd/aws-mcp-proxy
+go run ./cmd/aws-mcp-proxy <SigV4 MCP endpoint URL> [flags]
+```
+
+For example, the public AWS documentation MCP endpoint can be queried without
+SigV4 signing:
+
+```bash
+go run ./cmd/aws-mcp-proxy https://aws-mcp.us-east-1.api.aws/mcp --skip-auth
+```
+
+Run the live AWS documentation smoke test:
+
+```bash
+go run ./cmd/scripts/main.go smoke:aws-mcp --skip-auth
+```
+
+That smoke test lists upstream tools and calls
+`aws___search_documentation` with an Amazon S3 documentation query. It is the
+default live validation path because it does not require AWS credentials.
+
+Run a signed smoke manually by passing a configured AWS profile:
+
+```bash
+go run ./cmd/scripts/main.go smoke:aws-mcp --skip-auth=false --profile <profile>
+```
+
+Install from a GitHub release on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ajbeck/go-aws-mcp-proxy/main/install.sh | sh
 ```
 
 ## Planning
