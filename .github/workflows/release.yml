@@ -153,27 +153,24 @@ jobs:
         id: build
         shell: bash
         env:
-          GOOS: ${{ matrix.goos }}
-          GOARCH: ${{ matrix.goarch }}
           VERSION: ${{ needs.validate-and-tag.outputs.version }}
-          ARCHIVE: ${{ matrix.archive }}
         run: |
           set -euo pipefail
 
-          asset_base="aws-mcp-proxy-${GOOS}-${GOARCH}"
+          asset_base="aws-mcp-proxy-${{ matrix.goos }}-${{ matrix.goarch }}"
           binary="aws-mcp-proxy"
-          if [[ "${GOOS}" == "windows" ]]; then
+          if [[ "${{ matrix.goos }}" == "windows" ]]; then
             binary="${binary}.exe"
           fi
 
           mkdir -p "bin/${asset_base}"
           go run ./cmd/scripts/main.go build \
-            --goos "${GOOS}" \
-            --goarch "${GOARCH}" \
+            --goos "${{ matrix.goos }}" \
+            --goarch "${{ matrix.goarch }}" \
             --version "${VERSION}" \
             --output "bin/${asset_base}/${binary}"
 
-          if [[ "${ARCHIVE}" == "zip" ]]; then
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
             (cd bin && zip -r "${asset_base}.zip" "${asset_base}")
             asset="${asset_base}.zip"
           else
