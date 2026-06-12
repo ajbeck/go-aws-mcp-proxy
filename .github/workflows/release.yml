@@ -210,16 +210,18 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
           TAG: ${{ needs.validate-and-tag.outputs.tag }}
           COMMIT: ${{ needs.validate-and-tag.outputs.commit }}
         run: |
           set -euo pipefail
-          if gh release view "${TAG}" >/dev/null 2>&1; then
+          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
             echo "::error::release ${TAG} already exists"
             exit 1
           fi
 
           gh release create "${TAG}" dist/* \
+            --repo "${REPO}" \
             --target "${COMMIT}" \
             --title "${TAG}" \
             --generate-notes \
