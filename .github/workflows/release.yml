@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Checkout
         # https://github.com/actions/checkout
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           fetch-depth: 0
 
@@ -87,13 +87,13 @@ jobs:
 
       - name: Run CI at release commit
         # https://github.com/actions/checkout
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ steps.validate.outputs.commit }}
 
       - name: Set up Go
         # https://github.com/actions/setup-go
-        uses: actions/setup-go@v6.4.0
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: go.mod
 
@@ -139,13 +139,13 @@ jobs:
     steps:
       - name: Checkout release commit
         # https://github.com/actions/checkout
-        uses: actions/checkout@v6.0.3
+        uses: actions/checkout@v7.0.0
         with:
           ref: ${{ needs.validate-and-tag.outputs.commit }}
 
       - name: Set up Go
         # https://github.com/actions/setup-go
-        uses: actions/setup-go@v6.4.0
+        uses: actions/setup-go@v6.5.0
         with:
           go-version-file: go.mod
 
