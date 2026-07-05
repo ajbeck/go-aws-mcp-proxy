@@ -613,6 +613,38 @@ func TestMetadataMiddlewareAddsRequestMetadata(t *testing.T) {
 	}
 }
 
+func TestRequestMetadataInjectsRegionAndPreservesUserOverride(t *testing.T) {
+	metadata := requestMetadata(Config{
+		Region: new("us-east-1"),
+		Metadata: new(map[string]string{
+			"AWS_REGION": "us-west-2",
+			"team":       "platform",
+		}),
+	})
+
+	if metadata["AWS_REGION"] != "us-west-2" {
+		t.Fatalf("AWS_REGION = %q, want user override", metadata["AWS_REGION"])
+	}
+	if metadata["team"] != "platform" {
+		t.Fatalf("team = %q, want platform", metadata["team"])
+	}
+}
+
+func TestRequestMetadataOmitsRegionWhenUnresolved(t *testing.T) {
+	metadata := requestMetadata(Config{
+		Metadata: new(map[string]string{
+			"team": "platform",
+		}),
+	})
+
+	if _, ok := metadata["AWS_REGION"]; ok {
+		t.Fatalf("AWS_REGION was injected without a resolved region: %#v", metadata)
+	}
+	if metadata["team"] != "platform" {
+		t.Fatalf("team = %q, want platform", metadata["team"])
+	}
+}
+
 func TestRunRejectsDisallowedAWSProfile(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{

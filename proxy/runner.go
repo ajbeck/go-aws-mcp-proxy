@@ -543,7 +543,7 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 		Title:   defaultTitle,
 		Version: version,
 	}, nil)
-	if metadata := value(cfg.Metadata); len(metadata) > 0 {
+	if metadata := requestMetadata(cfg); len(metadata) > 0 {
 		client.AddSendingMiddleware(metadataMiddleware(metadata))
 	}
 
@@ -568,6 +568,17 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 			return nil, err
 		}
 	}
+}
+
+func requestMetadata(cfg Config) map[string]string {
+	metadata := make(map[string]string)
+	if cfg.Region != nil && *cfg.Region != "" {
+		metadata["AWS_REGION"] = *cfg.Region
+	}
+	for key, value := range value(cfg.Metadata) {
+		metadata[key] = value
+	}
+	return metadata
 }
 
 func metadataMiddleware(metadata map[string]string) mcp.Middleware {
