@@ -44,6 +44,10 @@ type userAgentRoundTripper struct {
 	userAgent string
 }
 
+type acceptRoundTripper struct {
+	base http.RoundTripper
+}
+
 type sigV4RoundTripper struct {
 	base        http.RoundTripper
 	clock       clock
@@ -80,6 +84,8 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 	if base == nil {
 		base = http.DefaultTransport
 	}
+
+	base = roundTripperWithConnectionLimits(base)
 
 	var caBundle []byte
 	var err error
@@ -126,6 +132,7 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 	if agent := userAgent(options, cfg.DisableTelemetry); agent != "" {
 		rt = userAgentRoundTripper{base: rt, userAgent: agent}
 	}
+	rt = acceptRoundTripper{base: rt}
 	return rt, nil
 }
 
@@ -180,6 +187,18 @@ func baseRoundTripper(client *http.Client) http.RoundTripper {
 
 func hasTransportTimeouts(cfg Config) bool {
 	return positiveDuration(cfg.ConnectTimeout) || positiveDuration(cfg.ReadTimeout) || positiveDuration(cfg.WriteTimeout)
+}
+
+func roundTripperWithConnectionLimits(base http.RoundTripper) http.RoundTripper {
+	transport, ok := base.(*http.Transport)
+	if !ok {
+		return base
+	}
+
+	cloned := transport.Clone()
+	cloned.MaxIdleConnsPerHost = 1
+	cloned.MaxConnsPerHost = 5
+	return cloned
 }
 
 func roundTripperWithTimeouts(base http.RoundTripper, cfg Config) (http.RoundTripper, error) {
@@ -332,6 +351,15 @@ func (t userAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	}
 	clone := req.Clone(req.Context())
 	clone.Header.Set("User-Agent", t.userAgent)
+	return t.base.RoundTrip(clone)
+}
+
+func (t acceptRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Header.Get("Accept") != "" {
+		return t.base.RoundTrip(req)
+	}
+	clone := req.Clone(req.Context())
+	clone.Header.Set("Accept", "application/json, text/event-stream")
 	return t.base.RoundTrip(clone)
 }
 

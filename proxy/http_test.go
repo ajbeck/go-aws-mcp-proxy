@@ -209,6 +209,32 @@ func TestNewHTTPClientAppliesTimeouts(t *testing.T) {
 	if base.DialContext == nil {
 		t.Fatal("DialContext was not configured")
 	}
+	if base.MaxIdleConnsPerHost != 1 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want 1", base.MaxIdleConnsPerHost)
+	}
+	if base.MaxConnsPerHost != 5 {
+		t.Fatalf("MaxConnsPerHost = %d, want 5", base.MaxConnsPerHost)
+	}
+}
+
+func TestNewHTTPClientAppliesConnectionLimitsWithoutTimeouts(t *testing.T) {
+	client, err := newClient(t.Context(), Config{
+		SkipAuth: new(true),
+	}, nil, clientOptions{})
+	if err != nil {
+		t.Fatalf("newClient() error = %v", err)
+	}
+
+	base, ok := findHTTPTransport(client.Transport)
+	if !ok {
+		t.Fatalf("client.Transport type = %T, no *http.Transport found", client.Transport)
+	}
+	if base.MaxIdleConnsPerHost != 1 {
+		t.Fatalf("MaxIdleConnsPerHost = %d, want 1", base.MaxIdleConnsPerHost)
+	}
+	if base.MaxConnsPerHost != 5 {
+		t.Fatalf("MaxConnsPerHost = %d, want 5", base.MaxConnsPerHost)
+	}
 }
 
 func TestTransportUserAgentIncludesClientInfoWhenTelemetryEnabled(t *testing.T) {
@@ -268,6 +294,48 @@ func TestTransportUserAgentOmitsClientInfoWhenTelemetryDisabled(t *testing.T) {
 	}
 }
 
+func TestTransportSetsDefaultAcceptHeader(t *testing.T) {
+	base := &captureRoundTripper{}
+	transport, err := newRoundTripper(t.Context(), Config{
+		SkipAuth: new(true),
+	}, base, clientOptions{})
+	if err != nil {
+		t.Fatalf("newRoundTripper() error = %v", err)
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	resp.Body.Close()
+
+	if got := base.request.Header.Get("Accept"); got != "application/json, text/event-stream" {
+		t.Fatalf("Accept = %q, want upstream-compatible default", got)
+	}
+}
+
+func TestTransportPreservesExistingAcceptHeader(t *testing.T) {
+	base := &captureRoundTripper{}
+	transport, err := newRoundTripper(t.Context(), Config{
+		SkipAuth: new(true),
+	}, base, clientOptions{})
+	if err != nil {
+		t.Fatalf("newRoundTripper() error = %v", err)
+	}
+
+	req := newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	req.Header.Set("Accept", "application/json")
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	resp.Body.Close()
+
+	if got := base.request.Header.Get("Accept"); got != "application/json" {
+		t.Fatalf("Accept = %q, want caller value preserved", got)
+	}
+}
+
 func TestDeadlineConnAppliesReadAndWriteDeadlines(t *testing.T) {
 	inner := &recordingConn{}
 	conn := &deadlineConn{
@@ -306,6 +374,8 @@ func findHTTPTransport(rt http.RoundTripper) (*http.Transport, bool) {
 	case userAgentRoundTripper:
 		return findHTTPTransport(rt.base)
 	case sigV4RoundTripper:
+		return findHTTPTransport(rt.base)
+	case acceptRoundTripper:
 		return findHTTPTransport(rt.base)
 	default:
 		return nil, false
