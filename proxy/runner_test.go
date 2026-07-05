@@ -645,6 +645,57 @@ func TestRequestMetadataOmitsRegionWhenUnresolved(t *testing.T) {
 	}
 }
 
+func TestValidateEndpointAcceptsHTTPSAndLocalHTTP(t *testing.T) {
+	endpoints := []string{
+		"https://service.us-east-1.api.aws/mcp",
+		"http://localhost:8080/mcp",
+		"http://127.0.0.1:8080/mcp",
+		"http://127.100.200.1:8080/mcp",
+		"http://[::1]:8080/mcp",
+	}
+
+	for _, endpoint := range endpoints {
+		if err := validateEndpoint(endpoint); err != nil {
+			t.Errorf("validateEndpoint(%q) = %v, want nil", endpoint, err)
+		}
+	}
+}
+
+func TestValidateEndpointRejectsUnsafeOrMalformedURLs(t *testing.T) {
+	endpoints := []string{
+		"http://example.com/mcp",
+		"example.com/mcp",
+		"https://",
+		"ftp://example.com/mcp",
+		"wss://example.com/mcp",
+	}
+
+	for _, endpoint := range endpoints {
+		if err := validateEndpoint(endpoint); err == nil {
+			t.Errorf("validateEndpoint(%q) = nil, want error", endpoint)
+		}
+	}
+}
+
+func TestDefaultConnectorRejectsRemoteHTTPWhenSkipAuthEnabled(t *testing.T) {
+	_, err := mcpUpstreamConnector{}.Connect(t.Context(), Config{
+		Endpoint: new("http://example.com/mcp"),
+		SkipAuth: new(true),
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "HTTP is not allowed") {
+		t.Fatalf("Connect() error = %v, want remote HTTP rejection", err)
+	}
+}
+
+func TestDefaultConnectorRejectsRemoteHTTPBeforeSigningConfig(t *testing.T) {
+	_, err := mcpUpstreamConnector{}.Connect(t.Context(), Config{
+		Endpoint: new("http://example.com/mcp"),
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "HTTP is not allowed") {
+		t.Fatalf("Connect() error = %v, want remote HTTP rejection", err)
+	}
+}
+
 func TestRunRejectsDisallowedAWSProfile(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	session := &fakeSession{
