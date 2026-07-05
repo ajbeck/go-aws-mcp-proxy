@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/netip"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -522,6 +525,14 @@ type mcpUpstreamConnector struct {
 }
 
 func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *mcp.InitializeParams) (UpstreamSession, error) {
+	endpoint, err := required(cfg.Endpoint, "endpoint")
+	if err != nil {
+		return nil, err
+	}
+	if err := validateEndpoint(endpoint); err != nil {
+		return nil, err
+	}
+
 	version := c.Version
 	if version == "" {
 		version = "dev"
@@ -545,11 +556,6 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 	}, nil)
 	if metadata := requestMetadata(cfg); len(metadata) > 0 {
 		client.AddSendingMiddleware(metadataMiddleware(metadata))
-	}
-
-	endpoint, err := required(cfg.Endpoint, "endpoint")
-	if err != nil {
-		return nil, err
 	}
 
 	retries := retryCount(cfg.Retries)
@@ -600,6 +606,39 @@ func metadataMiddleware(metadata map[string]string) mcp.Middleware {
 			return next(ctx, method, req)
 		}
 	}
+}
+
+func validateEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("invalid endpoint URL %q: %w", endpoint, err)
+	}
+	if parsed.Scheme == "" {
+		return fmt.Errorf("invalid endpoint URL %q: missing URL scheme; use https:// for secure connections", endpoint)
+	}
+	if parsed.Host == "" {
+		return fmt.Errorf("invalid endpoint URL %q: missing URL host", endpoint)
+	}
+
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if localEndpointHost(parsed.Hostname()) {
+			return nil
+		}
+		return fmt.Errorf("invalid endpoint URL %q: HTTP is not allowed for remote endpoints; use https:// instead", endpoint)
+	default:
+		return fmt.Errorf("invalid endpoint URL %q: unsupported scheme %q; only https is supported for remote endpoints", endpoint, parsed.Scheme)
+	}
+}
+
+func localEndpointHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }
 
 type upstreamState struct {
