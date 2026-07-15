@@ -171,6 +171,143 @@ func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
 	}
 }
 
+func TestRunDefersUpstreamConnectForKiroCLIUntilToolsList(t *testing.T) {
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	upstreamCaps := &mcp.ServerCapabilities{
+		Tools:     &mcp.ToolCapabilities{ListChanged: true},
+		Resources: &mcp.ResourceCapabilities{ListChanged: true},
+	}
+	session := &fakeSession{
+		result: &mcp.InitializeResult{Capabilities: upstreamCaps},
+		tools:  []*mcp.Tool{{Name: "aws___search_documentation", InputSchema: map[string]any{"type": "object"}}},
+	}
+	connector := &fakeConnector{sess: session}
+	options := RunOptions{
+		Connector: connector,
+		Transport: serverTransport,
+		Version:   "test-version",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errs := make(chan error, 1)
+	go func() {
+		errs <- Run(ctx, Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")}, options)
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "Kiro CLI", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+
+	if connector.called {
+		t.Fatal("upstream connector was called during initialize")
+	}
+	gotCaps := clientSession.InitializeResult().Capabilities
+	if gotCaps == nil || gotCaps.Tools == nil {
+		t.Fatalf("local tool capabilities missing: %#v", gotCaps)
+	}
+	if gotCaps.Resources != nil {
+		t.Fatalf("capabilities were replaced before lazy upstream connect: %#v", gotCaps)
+	}
+
+	tools, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if !connector.called {
+		t.Fatal("upstream connector was not called during tools/list")
+	}
+	if connector.params == nil || connector.params.ClientInfo == nil || connector.params.ClientInfo.Name != "Kiro CLI" {
+		t.Fatalf("connector initialize params = %#v", connector.params)
+	}
+	if findTool(tools.Tools, "aws___search_documentation") == nil {
+		t.Fatalf("tools = %#v, want upstream tool after lazy connect", tools.Tools)
+	}
+	if findTool(tools.Tools, proxyStatusToolName) == nil {
+		t.Fatalf("tools = %#v, want proxy status tool", tools.Tools)
+	}
+
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errs)
+	if !session.closed {
+		t.Fatal("upstream session was not closed")
+	}
+}
+
+func TestRunReturnsDeferredUpstreamConnectErrorDuringToolsList(t *testing.T) {
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	connector := &fakeConnector{err: errors.New("connect failed")}
+	options := RunOptions{
+		Connector: connector,
+		Transport: serverTransport,
+		Version:   "test-version",
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errs := make(chan error, 1)
+	go func() {
+		errs <- Run(ctx, Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")}, options)
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "Q Dev CLI", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	if connector.called {
+		t.Fatal("upstream connector was called during initialize")
+	}
+
+	_, err = clientSession.ListTools(ctx, &mcp.ListToolsParams{})
+	if err == nil {
+		t.Fatal("ListTools() error = nil")
+	}
+	if !connector.called {
+		t.Fatal("upstream connector was not called during tools/list")
+	}
+	for _, want := range []string{"Problem:", "Recommended next step:", "connect failed"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("ListTools() error = %q, want %q", err.Error(), want)
+		}
+	}
+
+	cancel()
+	select {
+	case <-errs:
+	case <-time.After(5 * time.Second):
+		t.Fatal("proxy did not exit after context cancellation")
+	}
+}
+
+func TestDeferredInitializeClientMatchesUpstreamCompatibilityNames(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{name: "Kiro CLI", want: true},
+		{name: "Amazon Q Dev CLI", want: true},
+		{name: "Amazon Q Developer CLI", want: true},
+		{name: "test-client", want: false},
+		{name: "Kiro IDE", want: false},
+	}
+
+	for _, tt := range tests {
+		params := &mcp.InitializeParams{
+			ClientInfo: &mcp.Implementation{Name: tt.name, Version: "1.0.0"},
+		}
+		if got := deferredInitializeClient(params); got != tt.want {
+			t.Errorf("deferredInitializeClient(%q) = %t, want %t", tt.name, got, tt.want)
+		}
+	}
+}
+
 func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
 	const headerName = "X-Test-Proxy-Client"
 	const headerValue = "custom"
