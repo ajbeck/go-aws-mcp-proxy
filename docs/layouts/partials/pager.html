@@ -1,0 +1,16 @@
+{{ $pages := .CurrentSection.Pages.ByWeight }}
+{{ $current := .RelPermalink }}
+{{ $prev := false }}
+{{ $next := false }}
+{{ range $index, $page := $pages }}
+{{ if eq $page.RelPermalink $current }}
+{{ if gt $index 0 }}{{ $prev = index $pages (sub $index 1) }}{{ end }}
+{{ if lt (add $index 1) (len $pages) }}{{ $next = index $pages (add $index 1) }}{{ end }}
+{{ end }}
+{{ end }}
+{{ if or $prev $next }}
+<nav class="pager-nav" aria-label="Previous and next pages">
+{{ with $prev }}<a class="pager-card" href="{{ .RelPermalink }}"><small>Previous</small><span>{{ .Title }}</span></a>{{ else }}<span></span>{{ end }}
+{{ with $next }}<a class="pager-card pager-card--next" href="{{ .RelPermalink }}"><small>Next</small><span>{{ .Title }}</span></a>{{ end }}
+</nav>
+{{ end }}

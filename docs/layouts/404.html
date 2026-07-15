@@ -1,0 +1,16 @@
+{{ define "body" }}
+<div class="site-shell">
+{{ partial "header.html" . }}
+<div class="docs-plain">
+<main class="content content--standalone not-found">
+<p class="eyebrow">404</p>
+<h1>Page not found</h1>
+<p>That page doesn't exist or may have moved. Try the documentation, or head back home.</p>
+<div class="hero__cta">
+<a class="btn btn--primary" href="{{ relref . "/docs" }}">Browse the docs</a>
+<a class="btn btn--line" href="{{ "/" | relURL }}">Back to home</a>
+</div>
+</main>
+</div>
+</div>
+{{ end }}

@@ -1,0 +1,12 @@
+{{ $section := .Section }}
+{{ if eq .Kind "section" }}{{ $section = .File.ContentBaseName }}{{ end }}
+<aside class="sidebar" aria-label="Section navigation">
+{{ $root := site.GetPage $section }}
+{{ with $root }}
+<p class="sidebar__head">{{ .Title }}</p>
+<a href="{{ .RelPermalink }}"{{ if eq $.RelPermalink .RelPermalink }} class="is-active"{{ end }}>Overview</a>
+{{ range .Pages.ByWeight }}
+<a href="{{ .RelPermalink }}"{{ if eq $.RelPermalink .RelPermalink }} class="is-active"{{ end }}>{{ .Title }}</a>
+{{ end }}
+{{ end }}
+</aside>

@@ -1,0 +1,21 @@
+{{ define "body" }}
+<div class="site-shell">
+{{ partial "header.html" . }}
+<div class="docs-grid">
+{{ partial "sidebar.html" . }}
+<main class="content">
+{{ partial "breadcrumbs.html" . }}
+{{ with .Params.kicker }}<p class="eyebrow">{{ . }}</p>{{ end }}
+<h1>{{ .Title }}</h1>
+<div class="meta-row">
+{{ with .Params.updated }}<span>Updated {{ . }}</span>{{ end }}
+{{ with .Params.tags }}<span>{{ delimit . " · " }}</span>{{ end }}
+</div>
+{{ with .Description }}<p class="lede">{{ . }}</p>{{ end }}
+{{ .Content }}
+{{ partial "pager.html" . }}
+</main>
+{{ partial "toc.html" . }}
+</div>
+</div>
+{{ end }}
