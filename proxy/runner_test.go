@@ -223,6 +223,116 @@ func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
 	}
 }
 
+func TestRunDegradesWhenSigningCredentialsAreUnavailable(t *testing.T) {
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	credentials := &staticCredentials{err: errors.New("no AWS credentials")}
+	options := RunOptions{
+		Transport:   serverTransport,
+		Version:     "test-version",
+		credentials: credentials,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errs := make(chan error, 1)
+	go func() {
+		errs <- Run(ctx, Config{
+			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Service:  new("aws-mcp"),
+			Region:   new("us-east-1"),
+		}, options)
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+
+	tools, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if len(tools.Tools) != 1 || tools.Tools[0].Name != proxyStatusToolName {
+		t.Fatalf("tools = %#v, want only proxy status", tools.Tools)
+	}
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: proxyStatusToolName})
+	if err != nil {
+		t.Fatalf("CallTool(%q) error = %v", proxyStatusToolName, err)
+	}
+	if result.IsError {
+		t.Fatalf("status result IsError = true: %#v", result)
+	}
+	status := result.StructuredContent.(map[string]any)
+	if status["status"] != "degraded" {
+		t.Fatalf("status = %#v, want degraded", status)
+	}
+	if status["reason"] != reasonCredentialUnavailable {
+		t.Fatalf("reason = %#v, want credential unavailable", status["reason"])
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "AWS credentials are not available") {
+		t.Fatalf("status text = %q, want credential guidance", text)
+	}
+
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errs)
+}
+
+func TestProxyStatusRequestsReconnectWhenCredentialsBecomeAvailableAfterDegradedInitialize(t *testing.T) {
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	credentials := &staticCredentials{err: errors.New("no AWS credentials")}
+	options := RunOptions{
+		Transport:   serverTransport,
+		Version:     "test-version",
+		credentials: credentials,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	errs := make(chan error, 1)
+	go func() {
+		errs <- Run(ctx, Config{
+			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Service:  new("aws-mcp"),
+			Region:   new("us-east-1"),
+		}, options)
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+
+	credentials.err = nil
+	credentials.creds.AccessKeyID = "AKIA"
+	credentials.creds.SecretAccessKey = "secret"
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: proxyStatusToolName})
+	if err != nil {
+		t.Fatalf("CallTool(%q) error = %v", proxyStatusToolName, err)
+	}
+	status := result.StructuredContent.(map[string]any)
+	if status["reason"] != reasonReconnectNeeded {
+		t.Fatalf("reason = %#v, want reconnect required", status["reason"])
+	}
+	text := result.Content[0].(*mcp.TextContent).Text
+	if !strings.Contains(text, "restart or reconnect") {
+		t.Fatalf("status text = %q, want reconnect guidance", text)
+	}
+
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errs)
+}
+
 func TestDefaultConnectorRetriesInitialize(t *testing.T) {
 	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
 	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
@@ -331,8 +441,11 @@ func TestRunRegistersAndForwardsUpstreamTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools() error = %v", err)
 	}
-	if len(tools.Tools) != 1 || tools.Tools[0].Name != "aws___call_aws" {
+	if findTool(tools.Tools, "aws___call_aws") == nil {
 		t.Fatalf("tools = %#v", tools.Tools)
+	}
+	if findTool(tools.Tools, proxyStatusToolName) == nil {
+		t.Fatalf("proxy status tool missing from tools = %#v", tools.Tools)
 	}
 
 	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{
@@ -682,7 +795,7 @@ func TestDefaultConnectorRejectsRemoteHTTPWhenSkipAuthEnabled(t *testing.T) {
 		Endpoint: new("http://example.com/mcp"),
 		SkipAuth: new(true),
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "HTTP is not allowed") {
+	if err == nil || !strings.Contains(err.Error(), "remote host") {
 		t.Fatalf("Connect() error = %v, want remote HTTP rejection", err)
 	}
 }
@@ -691,7 +804,7 @@ func TestDefaultConnectorRejectsRemoteHTTPBeforeSigningConfig(t *testing.T) {
 	_, err := mcpUpstreamConnector{}.Connect(t.Context(), Config{
 		Endpoint: new("http://example.com/mcp"),
 	}, nil)
-	if err == nil || !strings.Contains(err.Error(), "HTTP is not allowed") {
+	if err == nil || !strings.Contains(err.Error(), "remote host") {
 		t.Fatalf("Connect() error = %v, want remote HTTP rejection", err)
 	}
 }
@@ -843,8 +956,11 @@ func TestRunFiltersReadOnlyTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools() error = %v", err)
 	}
-	if len(tools.Tools) != 1 || tools.Tools[0].Name != "read" {
+	if findTool(tools.Tools, "read") == nil {
 		t.Fatalf("tools = %#v", tools.Tools)
+	}
+	if findTool(tools.Tools, proxyStatusToolName) == nil {
+		t.Fatalf("proxy status tool missing from tools = %#v", tools.Tools)
 	}
 
 	if err := clientSession.Close(); err != nil {

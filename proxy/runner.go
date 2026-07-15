@@ -46,6 +46,8 @@ type RunOptions struct {
 	Transport mcp.Transport
 	// Version is reported in MCP implementation metadata and user-agent data.
 	Version string
+
+	credentials credentialsProvider
 }
 
 // Run starts the proxy and blocks until the MCP server transport exits or the
@@ -53,23 +55,25 @@ type RunOptions struct {
 func Run(ctx context.Context, cfg Config, options RunOptions) error {
 	logger := options.Logger
 	run := proxyRun{
-		config:     cfg,
-		connector:  options.Connector,
-		httpClient: options.HTTPClient,
-		logger:     logger,
-		transport:  options.Transport,
-		version:    options.Version,
+		config:      cfg,
+		connector:   options.Connector,
+		credentials: options.credentials,
+		httpClient:  options.HTTPClient,
+		logger:      logger,
+		transport:   options.Transport,
+		version:     options.Version,
 	}
 	return run.run(ctx)
 }
 
 type proxyRun struct {
-	config     Config
-	connector  UpstreamConnector
-	httpClient *http.Client
-	logger     *slog.Logger
-	transport  mcp.Transport
-	version    string
+	config      Config
+	connector   UpstreamConnector
+	credentials credentialsProvider
+	httpClient  *http.Client
+	logger      *slog.Logger
+	transport   mcp.Transport
+	version     string
 
 	server   *mcp.Server
 	profiles profileSessions
@@ -79,6 +83,7 @@ type proxyRun struct {
 func (r *proxyRun) run(ctx context.Context) error {
 	server := r.newServer()
 	r.server = server
+	r.registerProxyStatusTool()
 	server.AddReceivingMiddleware(r.initializeMiddleware())
 
 	transport := r.transport
@@ -124,11 +129,11 @@ func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 
 			upstream, err := r.connectUpstream(ctx, params)
 			if err != nil {
-				return nil, err
+				return nil, classifyError(err)
 			}
 			if err := r.registerUpstreamTools(ctx, upstream); err != nil {
 				_ = r.upstream.Close()
-				return nil, err
+				return nil, classifyError(err)
 			}
 
 			result, err := next(ctx, method, req)
@@ -211,10 +216,11 @@ func (r *proxyRun) registerTool(tool *mcp.Tool, upstream UpstreamSession) {
 
 		result, err := r.callUpstreamTool(callCtx, upstream, req)
 		if err != nil {
+			proxyErr := classifyError(err)
 			if r.logger != nil {
-				r.logger.Error("upstream tool call failed", "tool", req.Params.Name, "duration_ms", time.Since(start).Milliseconds(), "error", err)
+				r.logger.Error("upstream tool call failed", "tool", req.Params.Name, "duration_ms", time.Since(start).Milliseconds(), "error_category", proxyErr.category, "error_reason", proxyErr.reason, "error", err)
 			}
-			return toolErrorResult(req.Params.Name, err), nil
+			return toolErrorResult(req.Params.Name, proxyErr), nil
 		}
 		if r.logger != nil {
 			r.logger.Debug("upstream tool call completed", "tool", req.Params.Name, "duration_ms", time.Since(start).Milliseconds(), "is_error", result != nil && result.IsError)
@@ -247,7 +253,14 @@ func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSessio
 
 	profiles := value(r.config.Profiles)
 	if !allowedProfile(profile, profiles) {
-		return nil, fmt.Errorf("profile %q is not in the allowed list; allowed profiles: %s", profile, profileList(profiles))
+		return nil, newProxyError(
+			categoryAgentFixable,
+			reasonInvalidProfile,
+			fmt.Sprintf("AWS profile %q is not in the allowed list", profile),
+			"Retry with one of the allowed AWS profiles: "+profileList(profiles)+".",
+			"",
+			nil,
+		)
 	}
 	defaultProfile := defaultProfile(r.config.Profiles)
 	if defaultProfile != nil && profile == *defaultProfile {
@@ -325,7 +338,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 func (r *proxyRun) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
 	connector := r.connector
 	if connector == nil {
-		connector = mcpUpstreamConnector{HTTPClient: r.httpClient, Version: r.version}
+		connector = mcpUpstreamConnector{Credentials: r.credentials, HTTPClient: r.httpClient, Version: r.version}
 	}
 
 	session, err := connector.Connect(ctx, r.config, params)
@@ -473,7 +486,14 @@ func argumentsAndProfile(arguments json.RawMessage) (any, string, error) {
 	}
 	profile, ok := value.(string)
 	if !ok || profile == "" {
-		return nil, "", fmt.Errorf("aws_profile must be a non-empty string")
+		return nil, "", newProxyError(
+			categoryAgentFixable,
+			reasonInvalidProfile,
+			"aws_profile must be a non-empty string",
+			"Retry the tool call with aws_profile set to one of the allowed profile names.",
+			"",
+			nil,
+		)
 	}
 	delete(decoded, "aws_profile")
 	encoded, err := json.Marshal(decoded)
@@ -511,24 +531,26 @@ func profileList(profiles []string) string {
 }
 
 func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
+	proxyErr := classifyError(err)
 	return &mcp.CallToolResult{
 		Content: []mcp.Content{
-			&mcp.TextContent{Text: fmt.Sprintf("Tool call %q failed: %v. Please retry.", toolName, err)},
+			&mcp.TextContent{Text: fmt.Sprintf("Tool call %q failed.\n%s", toolName, renderError(proxyErr))},
 		},
 		IsError: true,
 	}
 }
 
 type mcpUpstreamConnector struct {
-	HTTPClient *http.Client
-	Version    string
+	Credentials credentialsProvider
+	HTTPClient  *http.Client
+	Version     string
 }
 
 func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *mcp.InitializeParams) (UpstreamSession, error) {
-	endpoint, err := required(cfg.Endpoint, "endpoint")
-	if err != nil {
-		return nil, err
+	if cfg.Endpoint == nil {
+		return nil, missingConfigError("endpoint", reasonMissingEndpoint)
 	}
+	endpoint := *cfg.Endpoint
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, err
 	}
@@ -538,11 +560,36 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 		version = "dev"
 	}
 	options := clientOptions{
-		Version: version,
+		Credentials: c.Credentials,
+		Version:     version,
 	}
 	if params != nil && params.ClientInfo != nil {
 		options.ClientName = params.ClientInfo.Name
 		options.ClientVersion = params.ClientInfo.Version
+	}
+	if !enabled(cfg.SkipAuth) {
+		if cfg.Service == nil {
+			return nil, missingConfigError("service", reasonMissingService)
+		}
+		if cfg.Region == nil {
+			return nil, missingConfigError("region", reasonMissingRegion)
+		}
+		var caBundle []byte
+		if cfg.CaBundle != nil {
+			var err error
+			caBundle, err = readCABundle(*cfg.CaBundle)
+			if err != nil {
+				return nil, err
+			}
+		}
+		credentials, err := signingCredentialsProvider(ctx, cfg, caBundle, options)
+		if err != nil {
+			return nil, err
+		}
+		if err := preflightSigningCredentials(ctx, credentials); err != nil {
+			return degradedUpstreamSession{err: err}, nil
+		}
+		options.Credentials = credentials
 	}
 	httpClient, err := newClient(ctx, cfg, c.HTTPClient, options)
 	if err != nil {
@@ -611,13 +658,34 @@ func metadataMiddleware(metadata map[string]string) mcp.Middleware {
 func validateEndpoint(endpoint string) error {
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
-		return fmt.Errorf("invalid endpoint URL %q: %w", endpoint, err)
+		return newProxyError(
+			categoryConfiguration,
+			reasonUnsafeEndpoint,
+			fmt.Sprintf("endpoint URL %q is invalid", endpoint),
+			"Ask the user to configure a valid https:// endpoint, or localhost http:// endpoint for local development.",
+			"",
+			err,
+		)
 	}
 	if parsed.Scheme == "" {
-		return fmt.Errorf("invalid endpoint URL %q: missing URL scheme; use https:// for secure connections", endpoint)
+		return newProxyError(
+			categoryConfiguration,
+			reasonUnsafeEndpoint,
+			fmt.Sprintf("endpoint URL %q is missing a URL scheme", endpoint),
+			"Ask the user to configure an https:// endpoint, or localhost http:// endpoint for local development.",
+			"",
+			nil,
+		)
 	}
 	if parsed.Host == "" {
-		return fmt.Errorf("invalid endpoint URL %q: missing URL host", endpoint)
+		return newProxyError(
+			categoryConfiguration,
+			reasonUnsafeEndpoint,
+			fmt.Sprintf("endpoint URL %q is missing a URL host", endpoint),
+			"Ask the user to configure a complete endpoint URL.",
+			"",
+			nil,
+		)
 	}
 
 	switch strings.ToLower(parsed.Scheme) {
@@ -627,9 +695,23 @@ func validateEndpoint(endpoint string) error {
 		if localEndpointHost(parsed.Hostname()) {
 			return nil
 		}
-		return fmt.Errorf("invalid endpoint URL %q: HTTP is not allowed for remote endpoints; use https:// instead", endpoint)
+		return newProxyError(
+			categoryConfiguration,
+			reasonUnsafeEndpoint,
+			fmt.Sprintf("endpoint URL %q uses HTTP for a remote host", endpoint),
+			"Ask the user to change the endpoint to https:// or use a localhost HTTP endpoint for local development.",
+			"",
+			nil,
+		)
 	default:
-		return fmt.Errorf("invalid endpoint URL %q: unsupported scheme %q; only https is supported for remote endpoints", endpoint, parsed.Scheme)
+		return newProxyError(
+			categoryConfiguration,
+			reasonUnsafeEndpoint,
+			fmt.Sprintf("endpoint URL %q uses unsupported scheme %q", endpoint, parsed.Scheme),
+			"Ask the user to configure an https:// endpoint, or localhost http:// endpoint for local development.",
+			"",
+			nil,
+		)
 	}
 }
 
@@ -702,7 +784,7 @@ func (s *profileSessions) Get(ctx context.Context, profile string, run *proxyRun
 	cfg.Profiles = &[]string{profile}
 	connector := run.connector
 	if connector == nil {
-		connector = mcpUpstreamConnector{HTTPClient: run.httpClient, Version: run.version}
+		connector = mcpUpstreamConnector{Credentials: run.credentials, HTTPClient: run.httpClient, Version: run.version}
 	}
 
 	session, err := connector.Connect(ctx, cfg, params)
