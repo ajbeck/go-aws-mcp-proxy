@@ -68,6 +68,7 @@ func Run(ctx context.Context, cfg Config, options RunOptions) error {
 
 type proxyRun struct {
 	config      Config
+	connectMu   sync.Mutex
 	connector   UpstreamConnector
 	credentials credentialsProvider
 	httpClient  *http.Client
@@ -84,7 +85,7 @@ func (r *proxyRun) run(ctx context.Context) error {
 	server := r.newServer()
 	r.server = server
 	r.registerProxyStatusTool()
-	server.AddReceivingMiddleware(r.initializeMiddleware())
+	server.AddReceivingMiddleware(r.initializeMiddleware(), r.ensureUpstreamMiddleware())
 
 	transport := r.transport
 	if transport == nil {
@@ -127,13 +128,15 @@ func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 				return nil, fmt.Errorf("initialize params have unexpected type %T", req.GetParams())
 			}
 
-			upstream, err := r.connectUpstream(ctx, params)
-			if err != nil {
-				return nil, classifyError(err)
-			}
-			if err := r.registerUpstreamTools(ctx, upstream); err != nil {
-				_ = r.upstream.Close()
-				return nil, classifyError(err)
+			if deferredInitializeClient(params) {
+				r.profiles.SetInitializeParams(params)
+				if r.logger != nil {
+					r.logger.Info("deferring upstream connect for MCP client", "client_name", params.ClientInfo.Name, "client_version", params.ClientInfo.Version)
+				}
+			} else {
+				if _, err := r.ensureUpstreamReady(ctx, params); err != nil {
+					return nil, classifyError(err)
+				}
 			}
 
 			result, err := next(ctx, method, req)
@@ -146,10 +149,60 @@ func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 			if !ok {
 				return result, nil
 			}
-			applyUpstreamCapabilities(initializeResult, upstream.InitializeResult())
+			if upstream := r.upstream.Session(); upstream != nil {
+				applyUpstreamCapabilities(initializeResult, upstream.InitializeResult())
+			}
 			return initializeResult, nil
 		}
 	}
+}
+
+func (r *proxyRun) ensureUpstreamMiddleware() mcp.Middleware {
+	return func(next mcp.MethodHandler) mcp.MethodHandler {
+		return func(ctx context.Context, method string, req mcp.Request) (mcp.Result, error) {
+			if method != "tools/list" && method != "tools/call" {
+				return next(ctx, method, req)
+			}
+			if r.upstream.Session() == nil {
+				if _, err := r.ensureUpstreamReady(ctx, r.profiles.InitializeParams()); err != nil {
+					return nil, classifyError(err)
+				}
+			}
+			return next(ctx, method, req)
+		}
+	}
+}
+
+func (r *proxyRun) ensureUpstreamReady(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
+	if upstream := r.upstream.Session(); upstream != nil {
+		return upstream, nil
+	}
+
+	r.connectMu.Lock()
+	defer r.connectMu.Unlock()
+	if upstream := r.upstream.Session(); upstream != nil {
+		return upstream, nil
+	}
+
+	upstream, err := r.connectUpstream(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.registerUpstreamTools(ctx, upstream); err != nil {
+		_ = r.upstream.Close()
+		return nil, err
+	}
+	return upstream, nil
+}
+
+func deferredInitializeClient(params *mcp.InitializeParams) bool {
+	if params == nil || params.ClientInfo == nil {
+		return false
+	}
+	name := strings.ToLower(params.ClientInfo.Name)
+	return strings.Contains(name, "kiro cli") ||
+		strings.Contains(name, "q dev cli") ||
+		strings.Contains(name, "q developer cli")
 }
 
 func (r *proxyRun) registerUpstreamTools(ctx context.Context, upstream UpstreamSession) error {
@@ -742,6 +795,12 @@ func (s *upstreamState) Set(session UpstreamSession, clientInfo *mcp.Implementat
 	s.clientInfo = clientInfo
 }
 
+func (s *upstreamState) Session() UpstreamSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.session
+}
+
 func (s *upstreamState) ClientInfo() *mcp.Implementation {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -770,6 +829,12 @@ func (s *profileSessions) SetInitializeParams(params *mcp.InitializeParams) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.params = params
+}
+
+func (s *profileSessions) InitializeParams() *mcp.InitializeParams {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.params
 }
 
 func (s *profileSessions) Get(ctx context.Context, profile string, run *proxyRun) (UpstreamSession, error) {
