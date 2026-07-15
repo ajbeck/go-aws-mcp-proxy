@@ -1,0 +1,28 @@
+name: Setup Hugo
+description: Install a pinned Hugo extended release after verifying its checksum.
+
+inputs:
+  version:
+    description: Hugo version without the leading v.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install Hugo
+      shell: bash
+      env:
+        HUGO_VERSION: ${{ inputs.version }}
+      run: |
+        asset="hugo_extended_${HUGO_VERSION}_linux-amd64.tar.gz"
+        checksums="hugo_${HUGO_VERSION}_checksums.txt"
+        base_url="https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}"
+        install_dir="${RUNNER_TEMP}/hugo"
+
+        curl -fsSLO "${base_url}/${asset}"
+        curl -fsSLO "${base_url}/${checksums}"
+        grep " ${asset}$" "${checksums}" | sha256sum --check --status
+
+        mkdir -p "${install_dir}"
+        tar -C "${install_dir}" -xf "${asset}" hugo
+        echo "${install_dir}" >> "${GITHUB_PATH}"

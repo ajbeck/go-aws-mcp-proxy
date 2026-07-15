@@ -1,0 +1,69 @@
+name: Deploy docs to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'CHANGELOG.md'
+      - '.github/workflows/pages.yml'
+      - '.github/actions/setup-hugo/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build docs
+    runs-on: ubuntu-latest
+    env:
+      HUGO_VERSION: 0.163.3
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Pages
+        id: pages
+        uses: actions/configure-pages@v6
+
+      - name: Install Hugo
+        uses: ./.github/actions/setup-hugo
+        with:
+          version: ${{ env.HUGO_VERSION }}
+
+      # publishDir is 'public' relative to the docs source, so the artifact
+      # lives at docs/public (not ./public as in a repo-root publishDir setup).
+      - name: Build docs
+        run: |
+          hugo --source docs \
+            --gc \
+            --minify \
+            --baseURL "https://aws-mcp-proxy.ajbeck.dev/" \
+            --cacheDir "${{ runner.temp }}/hugo_cache"
+
+      - name: Upload docs artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/public
+
+  deploy:
+    name: Deploy docs
+    needs: build
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
