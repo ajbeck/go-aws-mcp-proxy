@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/pem"
+	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -336,6 +338,82 @@ func TestTransportPreservesExistingAcceptHeader(t *testing.T) {
 	}
 }
 
+func TestUpstreamErrorRoundTripperLogsSafeHTTPErrorDetails(t *testing.T) {
+	base := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusForbidden,
+			Status:     "403 Forbidden",
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"jsonrpc":"2.0","id":1,"error":{"code":-32001,"message":"denied","data":{"reason":"policy"}}}`)),
+			Request:    req,
+		}, nil
+	})
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	transport := upstreamErrorRoundTripper{base: base, logger: logger}
+
+	req := newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"secret":"request-body"}}`)
+	req.URL.RawQuery = "token=secret"
+	req.Header.Set("Authorization", "secret-auth")
+	_, err := transport.RoundTrip(req)
+	if err == nil {
+		t.Fatal("RoundTrip() error = nil")
+	}
+	httpErr, ok := errors.AsType[*upstreamHTTPError](err)
+	if !ok {
+		t.Fatalf("RoundTrip() error type = %T, want upstreamHTTPError", err)
+	}
+	if httpErr.jsonrpcCode == nil || *httpErr.jsonrpcCode != -32001 || httpErr.jsonrpcMessage != "denied" {
+		t.Fatalf("JSON-RPC fields = code %#v message %q", httpErr.jsonrpcCode, httpErr.jsonrpcMessage)
+	}
+
+	got := logs.String()
+	for _, forbidden := range []string{"request-body", "secret-auth", "token=secret"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("log leaked %q: %s", forbidden, got)
+		}
+	}
+	for _, want := range []string{"level=ERROR", "status=403", "url_path=/", "jsonrpc_code=-32001", "jsonrpc_message=denied"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("log = %s, want %q", got, want)
+		}
+	}
+}
+
+func TestUpstreamErrorRoundTripperCapsResponseBodyExcerpt(t *testing.T) {
+	body := strings.Repeat("a", maxHTTPErrorBodyBytes+10)
+	base := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Status:     "503 Service Unavailable",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(body)),
+			Request:    req,
+		}, nil
+	})
+	var logs bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	transport := upstreamErrorRoundTripper{base: base, logger: logger}
+
+	_, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+	if err == nil {
+		t.Fatal("RoundTrip() error = nil")
+	}
+	httpErr, ok := errors.AsType[*upstreamHTTPError](err)
+	if !ok {
+		t.Fatalf("RoundTrip() error type = %T, want upstreamHTTPError", err)
+	}
+	if len(httpErr.bodyExcerpt) != maxHTTPErrorBodyBytes {
+		t.Fatalf("body excerpt length = %d, want %d", len(httpErr.bodyExcerpt), maxHTTPErrorBodyBytes)
+	}
+	if !httpErr.bodyTruncated {
+		t.Fatal("bodyTruncated = false, want true")
+	}
+	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "response_body_truncated=true") {
+		t.Fatalf("log = %s, want WARN and truncation flag", got)
+	}
+}
+
 func TestDeadlineConnAppliesReadAndWriteDeadlines(t *testing.T) {
 	inner := &recordingConn{}
 	conn := &deadlineConn{
@@ -377,9 +455,17 @@ func findHTTPTransport(rt http.RoundTripper) (*http.Transport, bool) {
 		return findHTTPTransport(rt.base)
 	case acceptRoundTripper:
 		return findHTTPTransport(rt.base)
+	case upstreamErrorRoundTripper:
+		return findHTTPTransport(rt.base)
 	default:
 		return nil, false
 	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 func (*recordingConn) Read([]byte) (int, error) {

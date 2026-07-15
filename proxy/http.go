@@ -7,9 +7,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -49,6 +51,11 @@ type acceptRoundTripper struct {
 	base http.RoundTripper
 }
 
+type upstreamErrorRoundTripper struct {
+	base   http.RoundTripper
+	logger *slog.Logger
+}
+
 type sigV4RoundTripper struct {
 	base        http.RoundTripper
 	clock       clock
@@ -62,8 +69,11 @@ type clientOptions struct {
 	ClientName    string
 	ClientVersion string
 	Credentials   credentialsProvider
+	Logger        *slog.Logger
 	Version       string
 }
+
+const maxHTTPErrorBodyBytes = 4096
 
 func newClient(ctx context.Context, cfg Config, base *http.Client, options clientOptions) (*http.Client, error) {
 	transport, err := newRoundTripper(ctx, cfg, baseRoundTripper(base), options)
@@ -132,6 +142,7 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 	if agent := userAgent(options, cfg.DisableTelemetry); agent != "" {
 		rt = userAgentRoundTripper{base: rt, userAgent: agent}
 	}
+	rt = upstreamErrorRoundTripper{base: rt, logger: options.Logger}
 	rt = acceptRoundTripper{base: rt}
 	return rt, nil
 }
@@ -388,6 +399,20 @@ func (t acceptRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return t.base.RoundTrip(clone)
 }
 
+func (t upstreamErrorRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil || resp.StatusCode < 300 {
+		return resp, err
+	}
+
+	upstreamErr := newUpstreamHTTPError(resp)
+	if t.logger != nil {
+		t.logger.LogAttrs(req.Context(), httpErrorLogLevel(upstreamErr.statusCode), "upstream HTTP request failed", upstreamErr.logAttrs(req)...)
+	}
+	resp.Body.Close()
+	return nil, upstreamErr
+}
+
 func (t sigV4RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.credentials == nil {
 		return nil, fmt.Errorf("AWS credentials provider is not configured")
@@ -407,6 +432,107 @@ func (t sigV4RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 		return nil, err
 	}
 	return t.base.RoundTrip(clone)
+}
+
+type upstreamHTTPError struct {
+	statusCode     int
+	status         string
+	contentType    string
+	bodyExcerpt    string
+	bodyTruncated  bool
+	jsonrpcCode    *int64
+	jsonrpcMessage string
+	jsonrpcData    string
+}
+
+func (e *upstreamHTTPError) Error() string {
+	if e.jsonrpcMessage != "" {
+		return fmt.Sprintf("upstream HTTP %d: JSON-RPC error %d: %s", e.statusCode, value(e.jsonrpcCode), e.jsonrpcMessage)
+	}
+	if e.bodyExcerpt != "" {
+		return fmt.Sprintf("upstream HTTP %d: %s", e.statusCode, e.bodyExcerpt)
+	}
+	return fmt.Sprintf("upstream HTTP %d: %s", e.statusCode, http.StatusText(e.statusCode))
+}
+
+func (e *upstreamHTTPError) logAttrs(req *http.Request) []slog.Attr {
+	attrs := []slog.Attr{
+		slog.String("method", req.Method),
+		slog.String("url_scheme", req.URL.Scheme),
+		slog.String("url_host", req.URL.Host),
+		slog.String("url_path", req.URL.Path),
+		slog.Int("status", e.statusCode),
+		slog.String("content_type", e.contentType),
+		slog.Bool("response_body_truncated", e.bodyTruncated),
+	}
+	if e.bodyExcerpt != "" {
+		attrs = append(attrs, slog.String("response_body_excerpt", e.bodyExcerpt))
+	}
+	if e.jsonrpcCode != nil {
+		attrs = append(attrs, slog.Int64("jsonrpc_code", *e.jsonrpcCode))
+	}
+	if e.jsonrpcMessage != "" {
+		attrs = append(attrs, slog.String("jsonrpc_message", e.jsonrpcMessage))
+	}
+	if e.jsonrpcData != "" {
+		attrs = append(attrs, slog.String("jsonrpc_data_excerpt", e.jsonrpcData))
+	}
+	return attrs
+}
+
+func newUpstreamHTTPError(resp *http.Response) *upstreamHTTPError {
+	body, truncated := readHTTPErrorBody(resp)
+	bodyExcerpt := strings.TrimSpace(string(body))
+	err := &upstreamHTTPError{
+		statusCode:    resp.StatusCode,
+		status:        resp.Status,
+		contentType:   resp.Header.Get("Content-Type"),
+		bodyExcerpt:   bodyExcerpt,
+		bodyTruncated: truncated,
+	}
+	err.parseJSONRPCError(body)
+	return err
+}
+
+func readHTTPErrorBody(resp *http.Response) ([]byte, bool) {
+	if resp.Body == nil {
+		return nil, false
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPErrorBodyBytes+1))
+	if err != nil {
+		return []byte("failed to read upstream error response body: " + err.Error()), false
+	}
+	if len(body) > maxHTTPErrorBodyBytes {
+		return body[:maxHTTPErrorBodyBytes], true
+	}
+	return body, false
+}
+
+func (e *upstreamHTTPError) parseJSONRPCError(body []byte) {
+	var response struct {
+		Error *struct {
+			Code    int64           `json:"code"`
+			Message string          `json:"message"`
+			Data    json.RawMessage `json:"data,omitempty"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(body, &response); err != nil || response.Error == nil {
+		return
+	}
+	e.jsonrpcCode = new(response.Error.Code)
+	e.jsonrpcMessage = response.Error.Message
+	if len(response.Error.Data) > 0 {
+		e.jsonrpcData = string(response.Error.Data)
+	}
+}
+
+func httpErrorLogLevel(statusCode int) slog.Level {
+	switch statusCode {
+	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return slog.LevelWarn
+	default:
+		return slog.LevelError
+	}
 }
 
 func (t sigV4RoundTripper) sign(req *http.Request, body []byte, credentials aws.Credentials) error {

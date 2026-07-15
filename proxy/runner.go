@@ -338,7 +338,7 @@ func waitForRetry(ctx context.Context, delay time.Duration) error {
 func (r *proxyRun) connectUpstream(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
 	connector := r.connector
 	if connector == nil {
-		connector = mcpUpstreamConnector{Credentials: r.credentials, HTTPClient: r.httpClient, Version: r.version}
+		connector = mcpUpstreamConnector{Credentials: r.credentials, HTTPClient: r.httpClient, Logger: r.logger, Version: r.version}
 	}
 
 	session, err := connector.Connect(ctx, r.config, params)
@@ -543,6 +543,7 @@ func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
 type mcpUpstreamConnector struct {
 	Credentials credentialsProvider
 	HTTPClient  *http.Client
+	Logger      *slog.Logger
 	Version     string
 }
 
@@ -561,6 +562,7 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 	}
 	options := clientOptions{
 		Credentials: c.Credentials,
+		Logger:      c.Logger,
 		Version:     version,
 	}
 	if params != nil && params.ClientInfo != nil {
@@ -784,7 +786,7 @@ func (s *profileSessions) Get(ctx context.Context, profile string, run *proxyRun
 	cfg.Profiles = &[]string{profile}
 	connector := run.connector
 	if connector == nil {
-		connector = mcpUpstreamConnector{Credentials: run.credentials, HTTPClient: run.httpClient, Version: run.version}
+		connector = mcpUpstreamConnector{Credentials: run.credentials, HTTPClient: run.httpClient, Logger: run.logger, Version: run.version}
 	}
 
 	session, err := connector.Connect(ctx, cfg, params)
