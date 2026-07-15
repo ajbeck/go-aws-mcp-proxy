@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -60,6 +61,7 @@ type sigV4RoundTripper struct {
 type clientOptions struct {
 	ClientName    string
 	ClientVersion string
+	Credentials   credentialsProvider
 	Version       string
 }
 
@@ -108,24 +110,22 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 
 	rt := base
 	if !enabled(cfg.SkipAuth) {
-		service, err := required(cfg.Service, "service")
-		if err != nil {
-			return nil, err
+		if cfg.Service == nil {
+			return nil, missingConfigError("service", reasonMissingService)
 		}
-		region, err := required(cfg.Region, "region")
-		if err != nil {
-			return nil, err
+		if cfg.Region == nil {
+			return nil, missingConfigError("region", reasonMissingRegion)
 		}
-		awsCfg, err := loadAWSConfig(ctx, cfg, caBundle)
+		credentials, err := signingCredentialsProvider(ctx, cfg, caBundle, options)
 		if err != nil {
 			return nil, err
 		}
 		rt = sigV4RoundTripper{
 			base:        rt,
 			clock:       systemClock{},
-			credentials: awsCfg.Credentials,
-			region:      region,
-			service:     service,
+			credentials: credentials,
+			region:      *cfg.Region,
+			service:     *cfg.Service,
 			signer:      v4.NewSigner(),
 		}
 	}
@@ -134,6 +134,31 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 	}
 	rt = acceptRoundTripper{base: rt}
 	return rt, nil
+}
+
+func signingCredentialsProvider(ctx context.Context, cfg Config, caBundle []byte, options clientOptions) (credentialsProvider, error) {
+	if options.Credentials != nil {
+		return options.Credentials, nil
+	}
+	awsCfg, err := loadAWSConfig(ctx, cfg, caBundle)
+	if err != nil {
+		return nil, err
+	}
+	return awsCfg.Credentials, nil
+}
+
+func preflightSigningCredentials(ctx context.Context, provider credentialsProvider) error {
+	if provider == nil {
+		return credentialUnavailableError(errors.New("AWS credentials provider is not configured"))
+	}
+	credentials, err := provider.Retrieve(ctx)
+	if err != nil {
+		return credentialUnavailableError(err)
+	}
+	if !credentials.HasKeys() {
+		return credentialUnavailableError(errors.New("AWS credentials are empty"))
+	}
+	return nil
 }
 
 func userAgent(options clientOptions, disableTelemetry *bool) string {
