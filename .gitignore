@@ -3,3 +3,6 @@
 .codex/
 .claude/
 bin/
+docs/public/
+docs/.hugo_cache/
+docs/.hugo_build.lock
