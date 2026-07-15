@@ -1,0 +1,2 @@
+{{ $cmd := trim .Inner " \n" }}
+<div class="command-row" data-copy-block><span class="command-row__prompt">$</span><code>{{ $cmd }}</code><button class="copy-button" type="button" data-copy-value="{{ $cmd }}">Copy</button></div>

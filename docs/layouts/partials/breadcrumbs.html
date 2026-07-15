@@ -1,0 +1,5 @@
+<nav class="breadcrumbs" aria-label="Breadcrumbs">
+<a href="{{ site.Home.RelPermalink }}">Home</a>
+{{ with .CurrentSection }}{{ if not $.IsHome }}<span>/</span><a href="{{ .RelPermalink }}">{{ .Title }}</a>{{ end }}{{ end }}
+{{ if eq .Kind "page" }}<span>/</span><span>{{ .Title }}</span>{{ end }}
+</nav>

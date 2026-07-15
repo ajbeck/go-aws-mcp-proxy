@@ -1,0 +1,10 @@
+{{ define "body" }}
+<div class="site-shell">
+{{ partial "header.html" . }}
+<div class="docs-plain">
+<main class="content content--standalone">
+{{ .Content }}
+</main>
+</div>
+</div>
+{{ end }}

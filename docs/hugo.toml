@@ -1,0 +1,54 @@
+baseURL = 'https://aws-mcp-proxy.ajbeck.dev/'
+locale = 'en-us'
+title = 'AWS MCP Proxy'
+publishDir = 'public'
+resourceDir = '.hugo_cache'
+disableKinds = ['taxonomy', 'term', 'RSS']
+
+# Declaring any module mount replaces Hugo's defaults, so the standard
+# content/assets/static mounts are re-declared here alongside the CHANGELOG mount.
+[[module.mounts]]
+  source = 'content'
+  target = 'content'
+
+[[module.mounts]]
+  source = 'assets'
+  target = 'assets'
+
+[[module.mounts]]
+  source = 'static'
+  target = 'static'
+
+# Mount the repo-root CHANGELOG.md as the /changelog/ section page.
+[[module.mounts]]
+  source = '../CHANGELOG.md'
+  target = 'content/changelog/_index.md'
+
+[markup]
+  [markup.goldmark]
+    [markup.goldmark.renderer]
+      unsafe = true
+  [markup.tableOfContents]
+    startLevel = 2
+    endLevel = 3
+    ordered = false
+  [markup.highlight]
+    noClasses = false
+
+[params]
+  description = 'Documentation for go-aws-mcp-proxy, a native binary that bridges MCP clients to IAM-authenticated AWS MCP endpoints with SigV4 signing.'
+  github = 'https://github.com/ajbeck/go-aws-mcp-proxy'
+  installCommand = 'curl -fsSL https://raw.githubusercontent.com/ajbeck/go-aws-mcp-proxy/main/install.sh | sh'
+  upstream = 'https://github.com/aws/mcp-proxy-for-aws'
+  upstreamName = 'aws/mcp-proxy-for-aws'
+  awsMcp = 'https://github.com/awslabs/mcp'
+
+[[menus.main]]
+  name = 'Documentation'
+  pageRef = '/docs'
+  weight = 10
+
+[[menus.main]]
+  name = 'Changelog'
+  pageRef = '/changelog'
+  weight = 20

@@ -1,0 +1,67 @@
+{{ define "body" }}
+<div class="site-shell">
+{{ partial "header.html" . }}
+<main>
+<section class="hero">
+<div class="hero__stars" aria-hidden="true"></div>
+<div class="hero__inner">
+<p class="hero__eyebrow">AWS MCP access without a Python runtime</p>
+<h1>AWS MCP Proxy</h1>
+<p>A proxy for your MCP client to reach IAM-authenticated AWS MCP endpoints, signing each request with AWS SigV4. It's a Go rewrite of <a href="{{ site.Params.upstream }}" rel="noopener">AWS's Python proxy</a> that ships as one signed, self-contained binary — so there's no <code>uvx</code>, Python, or <code>uv</code> runtime to bootstrap, audit, and cache on every workstation, which is what makes it a fit for locked-down corporate environments.</p>
+<div class="hero__cta">
+<a class="btn btn--primary" href="{{ relref . "/docs/quickstart" }}">Quickstart <span aria-hidden="true">→</span></a>
+<a class="btn btn--ghost" href="{{ site.Params.github }}" rel="noopener">View on GitHub</a>
+</div>
+<div class="hero__install" data-copy-block>
+<span class="hero__prompt">$</span>
+<code>{{ site.Params.installCommand }}</code>
+<button class="copy-button" type="button" data-copy-value="{{ site.Params.installCommand }}">Copy</button>
+</div>
+</div>
+</section>
+<section class="home-section">
+<p class="section-kicker">Start here</p>
+<div class="card-grid">
+<a class="doc-card" href="{{ relref . "/docs/installation" }}">
+<span class="doc-card__icon doc-card__icon--indigo" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/><path d="M12 15V3"/></svg></span>
+<h2>Install the binary</h2>
+<p>One signed, checksummed binary per platform. Mirror it internally and skip the Python and <code>uv</code> bootstrap entirely.</p>
+<span class="doc-card__arrow">Installation →</span>
+</a>
+<a class="doc-card" href="{{ relref . "/docs/quickstart" }}">
+<span class="doc-card__icon doc-card__icon--amber" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 6h18"/><path d="m7 22-4-4 4-4"/><path d="M21 18H3"/></svg></span>
+<h2>Bridge a client</h2>
+<p>Connect a stdio MCP client to a remote Streamable HTTP AWS MCP endpoint in a single command.</p>
+<span class="doc-card__arrow">Quickstart →</span>
+</a>
+<a class="doc-card" href="{{ relref . "/docs/quickstart" }}#run-against-a-signed-endpoint">
+<span class="doc-card__icon doc-card__icon--green" aria-hidden="true"><svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z"/><path d="m9 12 2 2 4-4"/></svg></span>
+<h2>Sign with SigV4</h2>
+<p>Credentials load from the normal AWS chain — environment, shared config, profiles, and SSO — then sign outgoing MCP traffic.</p>
+<span class="doc-card__arrow">Sign requests →</span>
+</a>
+</div>
+</section>
+<section class="home-section home-section--split">
+<div>
+<p class="section-kicker">Why a Go rewrite</p>
+<div class="link-list link-list--static">
+<span>One binary per platform</span>
+<span>System trust store &amp; CA bundle option</span>
+<span>AWS SDK for Go v2 credential loading</span>
+<span>Signed, checksummed, SBOM-scannable</span>
+</div>
+</div>
+<div>
+<p class="section-kicker">Documentation</p>
+<div class="link-list">
+<a href="{{ relref . "/docs/installation" }}">Install the proxy</a>
+<a href="{{ relref . "/docs/quickstart" }}">Quickstart</a>
+<a href="{{ relref . "/docs/parity" }}">Parity with upstream</a>
+<a href="{{ relref . "/docs/troubleshooting" }}">Troubleshooting</a>
+</div>
+</div>
+</section>
+</main>
+</div>
+{{ end }}

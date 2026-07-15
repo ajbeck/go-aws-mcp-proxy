@@ -1,0 +1,6 @@
+{{ if and .TableOfContents (ne .TableOfContents "<nav id=\"TableOfContents\"></nav>") }}
+<nav class="toc" aria-label="On this page">
+<p class="toc__head">On this page</p>
+{{ .TableOfContents }}
+</nav>
+{{ end }}

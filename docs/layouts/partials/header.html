@@ -1,0 +1,10 @@
+<header class="topbar">
+<a class="brand" href="{{ site.Home.RelPermalink }}"><span class="brand__mark" aria-hidden="true">⇄</span><span>AWS MCP Proxy</span></a>
+<nav class="topnav" aria-label="Main navigation">
+{{ range site.Menus.main }}
+{{ $active := or ($.IsMenuCurrent .Menu .) ($.HasMenuCurrent .Menu .) }}
+<a href="{{ .URL }}"{{ if $active }} class="is-active"{{ end }}>{{ .Name }}</a>
+{{ end }}
+{{ with site.Params.github }}<a class="github-link" href="{{ . }}" rel="noopener">GitHub ↗</a>{{ end }}
+</nav>
+</header>

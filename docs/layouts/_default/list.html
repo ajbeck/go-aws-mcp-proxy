@@ -1,0 +1,20 @@
+{{ define "body" }}
+<div class="site-shell">
+{{ partial "header.html" . }}
+<div class="docs-grid docs-grid--list">
+{{ partial "sidebar.html" . }}
+<main class="content">
+{{ partial "breadcrumbs.html" . }}
+<p class="eyebrow">{{ .Title }}</p>
+<h1>{{ .Title }}</h1>
+{{ with .Description }}<p class="lede">{{ . }}</p>{{ end }}
+{{ .Content }}
+<div class="section-list">
+{{ range .Pages.ByWeight }}
+<a class="section-link" href="{{ .RelPermalink }}"><span>{{ .Title }}</span>{{ with .Description }}<small>{{ . }}</small>{{ end }}</a>
+{{ end }}
+</div>
+</main>
+</div>
+</div>
+{{ end }}
