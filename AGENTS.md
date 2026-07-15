@@ -19,7 +19,3 @@
 ## Testing Guidelines
 
 ## Commit and PR Guidelines
-
-## Agent Notes
-
-@RTK.md
