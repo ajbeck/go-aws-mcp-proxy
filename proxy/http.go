@@ -62,6 +62,7 @@ type sigV4RoundTripper struct {
 	credentials credentialsProvider
 	region      string
 	service     string
+	skipAuth    bool
 	signer      signer
 }
 
@@ -126,18 +127,19 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 		if cfg.Region == nil {
 			return nil, missingConfigError("region", reasonMissingRegion)
 		}
-		credentials, err := signingCredentialsProvider(ctx, cfg, caBundle, options)
-		if err != nil {
-			return nil, err
-		}
-		rt = sigV4RoundTripper{
-			base:        rt,
-			clock:       systemClock{},
-			credentials: credentials,
-			region:      *cfg.Region,
-			service:     *cfg.Service,
-			signer:      v4.NewSigner(),
-		}
+	}
+	credentials, err := signingCredentialsProvider(ctx, cfg, caBundle, options)
+	if err != nil {
+		return nil, err
+	}
+	rt = sigV4RoundTripper{
+		base:        rt,
+		clock:       systemClock{},
+		credentials: credentials,
+		region:      value(cfg.Region),
+		service:     value(cfg.Service),
+		skipAuth:    enabled(cfg.SkipAuth),
+		signer:      v4.NewSigner(),
 	}
 	if agent := userAgent(options, cfg.DisableTelemetry); agent != "" {
 		rt = userAgentRoundTripper{base: rt, userAgent: agent}
@@ -147,15 +149,27 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 	return rt, nil
 }
 
-func signingCredentialsProvider(ctx context.Context, cfg Config, caBundle []byte, options clientOptions) (credentialsProvider, error) {
+func signingCredentialsProvider(_ context.Context, cfg Config, caBundle []byte, options clientOptions) (credentialsProvider, error) {
 	if options.Credentials != nil {
 		return options.Credentials, nil
 	}
-	awsCfg, err := loadAWSConfig(ctx, cfg, caBundle)
+	return freshCredentialsProvider{cfg: cfg, caBundle: caBundle}, nil
+}
+
+// freshCredentialsProvider reloads the shared AWS configuration for every
+// request so refreshed SSO, profile, and process credentials take effect
+// without restarting the stdio proxy.
+type freshCredentialsProvider struct {
+	cfg      Config
+	caBundle []byte
+}
+
+func (p freshCredentialsProvider) Retrieve(ctx context.Context) (aws.Credentials, error) {
+	awsCfg, err := loadAWSConfig(ctx, p.cfg, p.caBundle)
 	if err != nil {
-		return nil, err
+		return aws.Credentials{}, err
 	}
-	return awsCfg.Credentials, nil
+	return awsCfg.Credentials.Retrieve(ctx)
 }
 
 func preflightSigningCredentials(ctx context.Context, provider credentialsProvider) error {
@@ -202,8 +216,13 @@ func sanitizeUserAgentToken(value string) string {
 }
 
 func loadAWSConfig(ctx context.Context, cfg Config, caBundle []byte) (aws.Config, error) {
-	options := []func(*config.LoadOptions) error{
-		config.WithRegion(value(cfg.Region)),
+	return loadAWSConfigWithRegion(ctx, cfg, caBundle, cfg.Region)
+}
+
+func loadAWSConfigWithRegion(ctx context.Context, cfg Config, caBundle []byte, region *string) (aws.Config, error) {
+	options := make([]func(*config.LoadOptions) error, 0, 3)
+	if region != nil && *region != "" {
+		options = append(options, config.WithRegion(*region))
 	}
 	if profile := defaultProfile(cfg.Profiles); profile != nil {
 		options = append(options, config.WithSharedConfigProfile(*profile))
@@ -212,6 +231,14 @@ func loadAWSConfig(ctx context.Context, cfg Config, caBundle []byte) (aws.Config
 		options = append(options, config.WithCustomCABundle(bytes.NewReader(caBundle)))
 	}
 	return config.LoadDefaultConfig(ctx, options...)
+}
+
+func metadataRegion(ctx context.Context, cfg Config, caBundle []byte) string {
+	awsCfg, err := loadAWSConfigWithRegion(ctx, cfg, caBundle, nil)
+	if err == nil && awsCfg.Region != "" {
+		return awsCfg.Region
+	}
+	return value(cfg.Region)
 }
 
 func baseRoundTripper(client *http.Client) http.RoundTripper {
@@ -407,23 +434,38 @@ func (t upstreamErrorRoundTripper) RoundTrip(req *http.Request) (*http.Response,
 
 	upstreamErr := newUpstreamHTTPError(resp)
 	if t.logger != nil {
-		t.logger.LogAttrs(req.Context(), httpErrorLogLevel(upstreamErr.statusCode), "upstream HTTP request failed", upstreamErr.logAttrs(req)...)
+		t.logger.LogAttrs(req.Context(), httpErrorLogLevel(req, upstreamErr.statusCode), "upstream HTTP request returned an error response", upstreamErr.logAttrs(req)...)
 	}
-	resp.Body.Close()
-	return nil, upstreamErr
+	// HTTP status codes are part of the Streamable HTTP protocol. In particular,
+	// an optional standalone SSE GET may return 405, which the MCP client treats
+	// as a signal to continue over the POST request-response channel. Preserve
+	// the response so the MCP transport can apply its protocol-specific handling.
+	return resp, nil
 }
 
 func (t sigV4RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	if t.credentials == nil {
 		return nil, fmt.Errorf("AWS credentials provider is not configured")
 	}
+	credentials, err := t.credentials.Retrieve(req.Context())
+	if err != nil || !credentials.HasKeys() {
+		if t.skipAuth {
+			return t.base.RoundTrip(req)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("retrieve AWS credentials: %w", err)
+		}
+		return nil, fmt.Errorf("retrieve AWS credentials: credentials are empty")
+	}
+	if t.service == "" {
+		return nil, missingConfigError("service", reasonMissingService)
+	}
+	if t.region == "" {
+		return nil, missingConfigError("region", reasonMissingRegion)
+	}
 	body, err := readBody(req)
 	if err != nil {
 		return nil, err
-	}
-	credentials, err := t.credentials.Retrieve(req.Context())
-	if err != nil {
-		return nil, fmt.Errorf("retrieve AWS credentials: %w", err)
 	}
 
 	clone := req.Clone(req.Context())
@@ -499,6 +541,10 @@ func readHTTPErrorBody(resp *http.Response) ([]byte, bool) {
 		return nil, false
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPErrorBodyBytes+1))
+	resp.Body = replayReadCloser{
+		Reader: io.MultiReader(bytes.NewReader(body), resp.Body),
+		Closer: resp.Body,
+	}
 	if err != nil {
 		return []byte("failed to read upstream error response body: " + err.Error()), false
 	}
@@ -526,13 +572,21 @@ func (e *upstreamHTTPError) parseJSONRPCError(body []byte) {
 	}
 }
 
-func httpErrorLogLevel(statusCode int) slog.Level {
+func httpErrorLogLevel(req *http.Request, statusCode int) slog.Level {
+	if statusCode == http.StatusMethodNotAllowed && (req.Method == http.MethodGet || req.Method == http.MethodDelete) {
+		return slog.LevelDebug
+	}
 	switch statusCode {
 	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return slog.LevelWarn
 	default:
 		return slog.LevelError
 	}
+}
+
+type replayReadCloser struct {
+	io.Reader
+	io.Closer
 }
 
 func (t sigV4RoundTripper) sign(req *http.Request, body []byte, credentials aws.Credentials) error {

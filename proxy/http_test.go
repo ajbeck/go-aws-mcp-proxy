@@ -22,12 +22,14 @@ import (
 
 type staticCredentials struct {
 	called bool
+	calls  int
 	creds  aws.Credentials
 	err    error
 }
 
 func (p *staticCredentials) Retrieve(context.Context) (aws.Credentials, error) {
 	p.called = true
+	p.calls++
 	return p.creds, p.err
 }
 
@@ -125,6 +127,78 @@ func TestSigningRoundTripperSignsClonedRequest(t *testing.T) {
 	}
 }
 
+func TestSigningRoundTripperWithSkipAuthSignsWhenCredentialsAreAvailable(t *testing.T) {
+	base := &captureRoundTripper{}
+	credentials := &staticCredentials{creds: aws.Credentials{
+		AccessKeyID:     "AKIA",
+		SecretAccessKey: "secret",
+	}}
+	signer := &recordingSigner{}
+	transport := sigV4RoundTripper{
+		base:        base,
+		clock:       fixedClock{},
+		credentials: credentials,
+		region:      "us-east-1",
+		service:     "aws-mcp",
+		skipAuth:    true,
+		signer:      signer,
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	resp.Body.Close()
+	if !signer.called {
+		t.Fatal("request was not signed when --skip-auth had credentials available")
+	}
+}
+
+func TestSigningRoundTripperWithSkipAuthSendsUnsignedWhenCredentialsAreUnavailable(t *testing.T) {
+	base := &captureRoundTripper{}
+	transport := sigV4RoundTripper{
+		base:        base,
+		credentials: &staticCredentials{err: errors.New("credentials unavailable")},
+		skipAuth:    true,
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	resp.Body.Close()
+	if got := base.request.Header.Get("Authorization"); got != "" {
+		t.Fatalf("Authorization = %q, want unsigned request", got)
+	}
+}
+
+func TestSigningRoundTripperRetrievesCredentialsForEveryRequest(t *testing.T) {
+	base := &captureRoundTripper{}
+	credentials := &staticCredentials{creds: aws.Credentials{
+		AccessKeyID:     "AKIA",
+		SecretAccessKey: "secret",
+	}}
+	transport := sigV4RoundTripper{
+		base:        base,
+		clock:       fixedClock{},
+		credentials: credentials,
+		region:      "us-east-1",
+		service:     "aws-mcp",
+		signer:      &recordingSigner{},
+	}
+
+	for range 2 {
+		resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+		if err != nil {
+			t.Fatalf("RoundTrip() error = %v", err)
+		}
+		resp.Body.Close()
+	}
+	if credentials.calls != 2 {
+		t.Fatalf("credential retrievals = %d, want 2", credentials.calls)
+	}
+}
+
 func TestNewHTTPClientTrustsCABundle(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
@@ -137,7 +211,7 @@ func TestNewHTTPClientTrustsCABundle(t *testing.T) {
 	client, err := newClient(t.Context(), Config{
 		CaBundle: new(bundlePath),
 		SkipAuth: new(true),
-	}, nil, clientOptions{})
+	}, nil, clientOptions{Credentials: &staticCredentials{err: errors.New("credentials unavailable")}})
 	if err != nil {
 		t.Fatalf("newClient() error = %v", err)
 	}
@@ -355,16 +429,20 @@ func TestUpstreamErrorRoundTripperLogsSafeHTTPErrorDetails(t *testing.T) {
 	req := newJSONRequest(t, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"secret":"request-body"}}`)
 	req.URL.RawQuery = "token=secret"
 	req.Header.Set("Authorization", "secret-auth")
-	_, err := transport.RoundTrip(req)
-	if err == nil {
-		t.Fatal("RoundTrip() error = nil")
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
 	}
-	httpErr, ok := errors.AsType[*upstreamHTTPError](err)
-	if !ok {
-		t.Fatalf("RoundTrip() error type = %T, want upstreamHTTPError", err)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
 	}
-	if httpErr.jsonrpcCode == nil || *httpErr.jsonrpcCode != -32001 || httpErr.jsonrpcMessage != "denied" {
-		t.Fatalf("JSON-RPC fields = code %#v message %q", httpErr.jsonrpcCode, httpErr.jsonrpcMessage)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(response body) error = %v", err)
+	}
+	if !strings.Contains(string(body), `"message":"denied"`) {
+		t.Fatalf("response body = %q, want JSON-RPC error", body)
 	}
 
 	got := logs.String()
@@ -395,19 +473,17 @@ func TestUpstreamErrorRoundTripperCapsResponseBodyExcerpt(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	transport := upstreamErrorRoundTripper{base: base, logger: logger}
 
-	_, err := transport.RoundTrip(newJSONRequest(t, `{}`))
-	if err == nil {
-		t.Fatal("RoundTrip() error = nil")
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
 	}
-	httpErr, ok := errors.AsType[*upstreamHTTPError](err)
-	if !ok {
-		t.Fatalf("RoundTrip() error type = %T, want upstreamHTTPError", err)
+	defer resp.Body.Close()
+	replayed, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll(response body) error = %v", err)
 	}
-	if len(httpErr.bodyExcerpt) != maxHTTPErrorBodyBytes {
-		t.Fatalf("body excerpt length = %d, want %d", len(httpErr.bodyExcerpt), maxHTTPErrorBodyBytes)
-	}
-	if !httpErr.bodyTruncated {
-		t.Fatal("bodyTruncated = false, want true")
+	if string(replayed) != body {
+		t.Fatalf("response body = %q, want original body", replayed)
 	}
 	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "response_body_truncated=true") {
 		t.Fatalf("log = %s, want WARN and truncation flag", got)

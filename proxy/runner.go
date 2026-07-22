@@ -330,10 +330,16 @@ func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSessio
 	if r.logger != nil {
 		r.logger.Info("routing tool call through profile override", "tool", req.Params.Name, "profile", profile)
 	}
-	return r.callSessionTool(ctx, session, &mcp.CallToolParams{
+	result, err := r.callSessionTool(ctx, session, &mcp.CallToolParams{
 		Name:      req.Params.Name,
 		Arguments: args,
 	})
+	if err != nil {
+		if closeErr := r.profiles.Invalidate(profile, session); closeErr != nil && r.logger != nil {
+			r.logger.Warn("failed to close invalidated profile session", "profile", profile, "error", closeErr)
+		}
+	}
+	return result, err
 }
 
 func (r *proxyRun) callSessionTool(ctx context.Context, session UpstreamSession, params *mcp.CallToolParams) (*mcp.CallToolResult, error) {
@@ -622,20 +628,20 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 		options.ClientName = params.ClientInfo.Name
 		options.ClientVersion = params.ClientInfo.Version
 	}
+	var caBundle []byte
+	if cfg.CaBundle != nil {
+		var err error
+		caBundle, err = readCABundle(*cfg.CaBundle)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if !enabled(cfg.SkipAuth) {
 		if cfg.Service == nil {
 			return nil, missingConfigError("service", reasonMissingService)
 		}
 		if cfg.Region == nil {
 			return nil, missingConfigError("region", reasonMissingRegion)
-		}
-		var caBundle []byte
-		if cfg.CaBundle != nil {
-			var err error
-			caBundle, err = readCABundle(*cfg.CaBundle)
-			if err != nil {
-				return nil, err
-			}
 		}
 		credentials, err := signingCredentialsProvider(ctx, cfg, caBundle, options)
 		if err != nil {
@@ -656,7 +662,7 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 		Title:   defaultTitle,
 		Version: version,
 	}, nil)
-	if metadata := requestMetadata(cfg); len(metadata) > 0 {
+	if metadata := requestMetadata(cfg, metadataRegion(ctx, cfg, caBundle)); len(metadata) > 0 {
 		client.AddSendingMiddleware(metadataMiddleware(metadata))
 	}
 
@@ -678,10 +684,14 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 	}
 }
 
-func requestMetadata(cfg Config) map[string]string {
+func requestMetadata(cfg Config, resolvedRegion ...string) map[string]string {
 	metadata := make(map[string]string)
-	if cfg.Region != nil && *cfg.Region != "" {
-		metadata["AWS_REGION"] = *cfg.Region
+	region := value(cfg.Region)
+	if len(resolvedRegion) > 0 {
+		region = resolvedRegion[0]
+	}
+	if region != "" {
+		metadata["AWS_REGION"] = region
 	}
 	for key, value := range value(cfg.Metadata) {
 		metadata[key] = value
@@ -864,6 +874,22 @@ func (s *profileSessions) Get(ctx context.Context, profile string, run *proxyRun
 	}
 	s.cache[profile] = session
 	return session, nil
+}
+
+// Invalidate removes a failed profile-specific session. The next tool call for
+// the profile will establish a new connection, picking up refreshed credentials
+// or a replacement upstream session. It deliberately does not retry the failed
+// tool call.
+func (s *profileSessions) Invalidate(profile string, failed UpstreamSession) error {
+	s.mu.Lock()
+	cached := s.cache[profile]
+	if cached != failed {
+		s.mu.Unlock()
+		return nil
+	}
+	delete(s.cache, profile)
+	s.mu.Unlock()
+	return failed.Close()
 }
 
 func (s *profileSessions) Close() error {
