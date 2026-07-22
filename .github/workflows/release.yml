@@ -8,8 +8,8 @@ on:
         required: true
         type: string
       commit:
-        description: "Commit SHA to tag and release. The commit must be reachable from main."
-        required: true
+        description: "Optional commit SHA to tag and release. Defaults to the current HEAD of main."
+        required: false
         type: string
 
 permissions:
@@ -55,7 +55,11 @@ jobs:
           git fetch --force origin main:refs/remotes/origin/main
           git fetch --force --tags origin
 
-          commit="$(git rev-parse "${INPUT_COMMIT}^{commit}")"
+          if [[ -n "${INPUT_COMMIT}" ]]; then
+            commit="$(git rev-parse "${INPUT_COMMIT}^{commit}")"
+          else
+            commit="$(git rev-parse refs/remotes/origin/main^{commit})"
+          fi
           if ! git merge-base --is-ancestor "${commit}" refs/remotes/origin/main; then
             echo "::error::commit ${commit} is not reachable from main"
             exit 1
