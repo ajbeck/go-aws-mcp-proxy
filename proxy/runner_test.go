@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -360,6 +361,66 @@ func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
 	}
 }
 
+func TestRunRegistersToolsWhenStandaloneSSEIsUnsupported(t *testing.T) {
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
+	upstream.AddTool(&mcp.Tool{
+		Name:        "upstream-tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return upstream
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	var getRequests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodGet {
+			getRequests.Add(1)
+			w.Header().Set("Allow", http.MethodPost)
+			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		handler.ServeHTTP(w, req)
+	}))
+	t.Cleanup(server.Close)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errs := make(chan error, 1)
+	go func() {
+		errs <- Run(ctx, Config{
+			Endpoint: new(server.URL),
+			SkipAuth: new(true),
+		}, RunOptions{
+			Transport:   serverTransport,
+			Version:     "test-version",
+			credentials: &staticCredentials{err: errors.New("credentials unavailable")},
+		})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	tools, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if findTool(tools.Tools, "upstream-tool") == nil {
+		t.Fatalf("tools = %#v, want registered upstream tool", tools.Tools)
+	}
+	if getRequests.Load() != 1 {
+		t.Fatalf("standalone SSE GET requests = %d, want 1", getRequests.Load())
+	}
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errs)
+}
+
 func TestRunDegradesWhenSigningCredentialsAreUnavailable(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	credentials := &staticCredentials{err: errors.New("no AWS credentials")}
@@ -418,6 +479,54 @@ func TestRunDegradesWhenSigningCredentialsAreUnavailable(t *testing.T) {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
 	waitForProxyRunExit(t, ctx, errs)
+}
+
+func TestProxyStatusWithSkipAuthReportsCurrentSigningMode(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider credentialsProvider
+		wantMode string
+		wantHave bool
+	}{
+		{
+			name: "signs when credentials are available",
+			provider: &staticCredentials{creds: aws.Credentials{
+				AccessKeyID:     "AKIA",
+				SecretAccessKey: "secret",
+			}},
+			wantMode: "signed",
+			wantHave: true,
+		},
+		{
+			name:     "uses unsigned requests when credentials are unavailable",
+			provider: &staticCredentials{err: errors.New("credentials unavailable")},
+			wantMode: "unsigned",
+			wantHave: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			run := proxyRun{
+				config: Config{
+					Service:  new("aws-mcp"),
+					Region:   new("us-east-1"),
+					SkipAuth: new(true),
+				},
+				credentials: tt.provider,
+			}
+			status := run.proxyStatus(t.Context()).StructuredContent.(map[string]any)
+			if status["status"] != "connected" {
+				t.Fatalf("status = %#v, want connected", status["status"])
+			}
+			if status["signing_mode"] != tt.wantMode {
+				t.Fatalf("signing_mode = %#v, want %q", status["signing_mode"], tt.wantMode)
+			}
+			if status["credentials_available"] != tt.wantHave {
+				t.Fatalf("credentials_available = %#v, want %t", status["credentials_available"], tt.wantHave)
+			}
+		})
+	}
 }
 
 func TestProxyStatusRequestsReconnectWhenCredentialsBecomeAvailableAfterDegradedInitialize(t *testing.T) {
@@ -530,6 +639,33 @@ func TestRegisterUpstreamToolsRetriesListTools(t *testing.T) {
 	}
 	if upstream.listCount != 2 {
 		t.Fatalf("ListTools count = %d, want 2", upstream.listCount)
+	}
+}
+
+func TestProfileOverrideInvalidatesFailedSession(t *testing.T) {
+	failed := &fakeSession{callErr: errors.New("session closed")}
+	run := proxyRun{
+		config: Config{
+			Profiles: new([]string{"default", "dev"}),
+			Retries:  new(0),
+		},
+		profiles: profileSessions{cache: map[string]UpstreamSession{"dev": failed}},
+	}
+
+	_, err := run.callUpstreamTool(t.Context(), &fakeSession{}, &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "aws___call_aws",
+			Arguments: json.RawMessage(`{"aws_profile":"dev"}`),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "session closed") {
+		t.Fatalf("callUpstreamTool() error = %v, want failed profile session error", err)
+	}
+	if !failed.closed {
+		t.Fatal("failed profile session was not closed")
+	}
+	if _, ok := run.profiles.cache["dev"]; ok {
+		t.Fatal("failed profile session remained cached")
 	}
 }
 
@@ -877,6 +1013,13 @@ func TestRequestMetadataInjectsRegionAndPreservesUserOverride(t *testing.T) {
 	}
 	if metadata["team"] != "platform" {
 		t.Fatalf("team = %q, want platform", metadata["team"])
+	}
+}
+
+func TestRequestMetadataUsesProfileRegionBeforeSigningRegion(t *testing.T) {
+	metadata := requestMetadata(Config{Region: new("eu-central-1")}, "sa-east-1")
+	if metadata["AWS_REGION"] != "sa-east-1" {
+		t.Fatalf("AWS_REGION = %q, want profile region", metadata["AWS_REGION"])
 	}
 }
 

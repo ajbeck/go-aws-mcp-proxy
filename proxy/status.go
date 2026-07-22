@@ -76,12 +76,15 @@ func (r *proxyRun) proxyStatus(ctx context.Context) *mcp.CallToolResult {
 	var credentialsAvailable any
 	var proxyErr *proxyError
 
-	if !credentialsRequired {
-		signingMode = "unsigned"
-	} else if err := r.checkSigningCredentials(ctx); err != nil {
-		status = "degraded"
+	if err := r.checkSigningCredentials(ctx); err != nil {
 		credentialsAvailable = false
 		proxyErr = classifyError(err)
+		if enabled(r.config.SkipAuth) && proxyErr.reason == reasonCredentialUnavailable {
+			signingMode = "unsigned"
+			proxyErr = nil
+		} else {
+			status = "degraded"
+		}
 	} else {
 		credentialsAvailable = true
 		if err := r.upstream.DegradedError(); err != nil {
@@ -138,16 +141,6 @@ func (r *proxyRun) proxyStatus(ctx context.Context) *mcp.CallToolResult {
 }
 
 func (r *proxyRun) checkSigningCredentials(ctx context.Context) error {
-	if enabled(r.config.SkipAuth) {
-		return nil
-	}
-	if r.config.Service == nil {
-		return missingConfigError("service", reasonMissingService)
-	}
-	if r.config.Region == nil {
-		return missingConfigError("region", reasonMissingRegion)
-	}
-
 	var caBundle []byte
 	if r.config.CaBundle != nil {
 		var err error
@@ -160,7 +153,16 @@ func (r *proxyRun) checkSigningCredentials(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	return preflightSigningCredentials(ctx, provider)
+	if err := preflightSigningCredentials(ctx, provider); err != nil {
+		return err
+	}
+	if r.config.Service == nil {
+		return missingConfigError("service", reasonMissingService)
+	}
+	if r.config.Region == nil {
+		return missingConfigError("region", reasonMissingRegion)
+	}
+	return nil
 }
 
 func (s *upstreamState) DegradedError() error {
