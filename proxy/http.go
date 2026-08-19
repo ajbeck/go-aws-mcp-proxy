@@ -57,13 +57,13 @@ type upstreamErrorRoundTripper struct {
 }
 
 type sigV4RoundTripper struct {
-	base        http.RoundTripper
-	clock       clock
-	credentials credentialsProvider
-	region      string
-	service     string
-	skipAuth    bool
-	signer      signer
+	base         http.RoundTripper
+	clock        clock
+	credentials  credentialsProvider
+	region       string
+	service      string
+	optionalAuth bool
+	signer       signer
 }
 
 type clientOptions struct {
@@ -119,8 +119,13 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 		}
 	}
 
+	mode, err := authModeFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+
 	rt := base
-	if !enabled(cfg.SkipAuth) {
+	if mode != authModeSkipped {
 		if cfg.Service == nil {
 			return nil, missingConfigError("service", reasonMissingService)
 		}
@@ -128,18 +133,20 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 			return nil, missingConfigError("region", reasonMissingRegion)
 		}
 	}
-	credentials, err := signingCredentialsProvider(ctx, cfg, caBundle, options)
-	if err != nil {
-		return nil, err
-	}
-	rt = sigV4RoundTripper{
-		base:        rt,
-		clock:       systemClock{},
-		credentials: credentials,
-		region:      value(cfg.Region),
-		service:     value(cfg.Service),
-		skipAuth:    enabled(cfg.SkipAuth),
-		signer:      v4.NewSigner(),
+	if mode != authModeSkipped {
+		credentials, err := signingCredentialsProvider(ctx, cfg, caBundle, options)
+		if err != nil {
+			return nil, err
+		}
+		rt = sigV4RoundTripper{
+			base:         rt,
+			clock:        systemClock{},
+			credentials:  credentials,
+			region:       value(cfg.Region),
+			service:      value(cfg.Service),
+			optionalAuth: mode == authModeOptional,
+			signer:       v4.NewSigner(),
+		}
 	}
 	if agent := userAgent(options, cfg.DisableTelemetry); agent != "" {
 		rt = userAgentRoundTripper{base: rt, userAgent: agent}
@@ -234,6 +241,9 @@ func loadAWSConfigWithRegion(ctx context.Context, cfg Config, caBundle []byte, r
 }
 
 func metadataRegion(ctx context.Context, cfg Config, caBundle []byte) string {
+	if enabled(cfg.SkipAuth) {
+		return value(cfg.Region)
+	}
 	awsCfg, err := loadAWSConfigWithRegion(ctx, cfg, caBundle, nil)
 	if err == nil && awsCfg.Region != "" {
 		return awsCfg.Region
@@ -449,7 +459,7 @@ func (t sigV4RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 	}
 	credentials, err := t.credentials.Retrieve(req.Context())
 	if err != nil || !credentials.HasKeys() {
-		if t.skipAuth {
+		if t.optionalAuth {
 			return t.base.RoundTrip(req)
 		}
 		if err != nil {

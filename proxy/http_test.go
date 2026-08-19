@@ -127,48 +127,100 @@ func TestSigningRoundTripperSignsClonedRequest(t *testing.T) {
 	}
 }
 
-func TestSigningRoundTripperWithSkipAuthSignsWhenCredentialsAreAvailable(t *testing.T) {
+func TestNewRoundTripperWithSkipAuthNeverLoadsOrUsesCredentials(t *testing.T) {
 	base := &captureRoundTripper{}
 	credentials := &staticCredentials{creds: aws.Credentials{
 		AccessKeyID:     "AKIA",
 		SecretAccessKey: "secret",
 	}}
-	signer := &recordingSigner{}
-	transport := sigV4RoundTripper{
-		base:        base,
-		clock:       fixedClock{},
-		credentials: credentials,
-		region:      "us-east-1",
-		service:     "aws-mcp",
-		skipAuth:    true,
-		signer:      signer,
+	transport, err := newRoundTripper(t.Context(), Config{
+		SkipAuth: new(true),
+	}, base, clientOptions{Credentials: credentials})
+	if err != nil {
+		t.Fatalf("newRoundTripper() error = %v", err)
 	}
 
-	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
-	if err != nil {
-		t.Fatalf("RoundTrip() error = %v", err)
+	for _, method := range []string{http.MethodPost, http.MethodGet, http.MethodDelete} {
+		req := newJSONRequest(t, `{}`)
+		req.Method = method
+		resp, err := transport.RoundTrip(req)
+		if err != nil {
+			t.Fatalf("RoundTrip(%s) error = %v", method, err)
+		}
+		if err := resp.Body.Close(); err != nil {
+			t.Fatalf("response body close: %v", err)
+		}
+		if got := base.request.Header.Get("Authorization"); got != "" {
+			t.Errorf("%s Authorization = %q, want unsigned request", method, got)
+		}
 	}
-	resp.Body.Close()
-	if !signer.called {
-		t.Fatal("request was not signed when --skip-auth had credentials available")
+	if credentials.called {
+		t.Fatal("credentials were retrieved for --skip-auth")
 	}
 }
 
-func TestSigningRoundTripperWithSkipAuthSendsUnsignedWhenCredentialsAreUnavailable(t *testing.T) {
+func TestNewRoundTripperWithOptionalAuthSignsWhenCredentialsAreAvailable(t *testing.T) {
 	base := &captureRoundTripper{}
-	transport := sigV4RoundTripper{
-		base:        base,
-		credentials: &staticCredentials{err: errors.New("credentials unavailable")},
-		skipAuth:    true,
+	credentials := &staticCredentials{creds: aws.Credentials{
+		AccessKeyID:     "AKIA",
+		SecretAccessKey: "secret",
+	}}
+	transport, err := newRoundTripper(t.Context(), Config{
+		Service:      new("aws-mcp"),
+		Region:       new("us-east-1"),
+		OptionalAuth: new(true),
+	}, base, clientOptions{Credentials: credentials})
+	if err != nil {
+		t.Fatalf("newRoundTripper() error = %v", err)
 	}
 
 	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
 	if err != nil {
 		t.Fatalf("RoundTrip() error = %v", err)
 	}
-	resp.Body.Close()
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("response body close: %v", err)
+	}
+	if got := base.request.Header.Get("Authorization"); got == "" {
+		t.Fatal("Authorization is empty, want signed request")
+	}
+}
+
+func TestNewRoundTripperWithOptionalAuthSendsUnsignedWhenCredentialsAreUnavailable(t *testing.T) {
+	base := &captureRoundTripper{}
+	transport, err := newRoundTripper(t.Context(), Config{
+		Service:      new("aws-mcp"),
+		Region:       new("us-east-1"),
+		OptionalAuth: new(true),
+	}, base, clientOptions{Credentials: &staticCredentials{err: errors.New("credentials unavailable")}})
+	if err != nil {
+		t.Fatalf("newRoundTripper() error = %v", err)
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("response body close: %v", err)
+	}
 	if got := base.request.Header.Get("Authorization"); got != "" {
 		t.Fatalf("Authorization = %q, want unsigned request", got)
+	}
+}
+
+func TestNewRoundTripperWithRequiredAuthReturnsCredentialErrors(t *testing.T) {
+	transport, err := newRoundTripper(t.Context(), Config{
+		Service: new("aws-mcp"),
+		Region:  new("us-east-1"),
+	}, &captureRoundTripper{}, clientOptions{Credentials: &staticCredentials{err: errors.New("credentials unavailable")}})
+	if err != nil {
+		t.Fatalf("newRoundTripper() error = %v", err)
+	}
+
+	_, err = transport.RoundTrip(newJSONRequest(t, `{}`))
+	if err == nil || !strings.Contains(err.Error(), "credentials unavailable") {
+		t.Fatalf("RoundTrip() error = %v, want credential error", err)
 	}
 }
 
@@ -254,6 +306,16 @@ func TestNewHTTPTransportRequiresSigningConfigWhenAuthEnabled(t *testing.T) {
 	}, http.DefaultTransport, clientOptions{})
 	if err == nil || !strings.Contains(err.Error(), "region is required") {
 		t.Fatalf("newRoundTripper() error = %v, want region required", err)
+	}
+}
+
+func TestNewRoundTripperRejectsConflictingAuthModes(t *testing.T) {
+	_, err := newRoundTripper(t.Context(), Config{
+		SkipAuth:     new(true),
+		OptionalAuth: new(true),
+	}, http.DefaultTransport, clientOptions{})
+	if err == nil || !strings.Contains(err.Error(), "cannot be used together") {
+		t.Fatalf("newRoundTripper() error = %v, want conflicting auth modes error", err)
 	}
 }
 

@@ -94,8 +94,9 @@ Run the proxy:
 go run ./cmd/aws-mcp-proxy <SigV4 MCP endpoint URL> [flags]
 ```
 
-For example, the public AWS documentation MCP endpoint can be queried without
-SigV4 signing:
+For example, the public AWS documentation MCP endpoint can be queried with
+strictly unsigned traffic. `--skip-auth` never loads credentials or signs any
+upstream request:
 
 ```bash
 go run ./cmd/aws-mcp-proxy https://aws-mcp.us-east-1.api.aws/mcp --skip-auth

@@ -27,7 +27,8 @@ This project targets **parity+** with [aws/mcp-proxy-for-aws](https://github.com
 | `--read-timeout`      | seconds   | <span class="badge badge--ok">Supported</span>   | Read timeout.                                                                                                                               |
 | `--write-timeout`     | seconds   | <span class="badge badge--ok">Supported</span>   | Write timeout.                                                                                                                              |
 | `--tool-timeout`      | seconds   | <span class="badge badge--ok">Supported</span>   | Max seconds a tool call may run before cancellation.                                                                                        |
-| `--skip-auth`         | flag      | <span class="badge badge--ok">Supported</span>   | Send unsigned requests when credentials are unavailable.                                                                                    |
+| `--skip-auth`         | flag      | <span class="badge badge--add">Added here</span> | Always send unsigned requests and do not load AWS credentials.                                                                              |
+| `--optional-auth`     | flag      | <span class="badge badge--add">Added here</span> | Sign when credentials resolve; otherwise send unsigned requests. Cannot be combined with `--skip-auth`.                                     |
 | `--disable-telemetry` | flag      | <span class="badge badge--ok">Supported</span>   | Disable telemetry in outbound user-agent data.                                                                                              |
 | `--ca-bundle`         | path      | <span class="badge badge--add">Added here</span> | Not in upstream. Trust an extra PEM bundle for TLS-intercepting corporate proxies without installing roots globally. Reads `AWS_CA_BUNDLE`. |
 
@@ -40,5 +41,6 @@ Where this proxy diverges from upstream, it leans toward resilience and convenie
 - **Retries default to 3, not 0.** Upstream disables retries by default; this proxy retries transient upstream failures out of the box (pass `--retries 0` to disable).
 - **Service and region are inferred from the endpoint.** The host is parsed to derive the SigV4 service and region — including `*.api.aws` and `bedrock-agentcore` forms — so `--service` and `--region` are usually optional.
 - **A managed CA bundle option.** `--ca-bundle` (or `AWS_CA_BUNDLE`) trusts an extra PEM bundle on top of the system roots, for corporate TLS interception, without modifying the machine's global trust store.
+- **Authentication modes are explicit.** Upstream `--skip-auth` still signs when it can resolve credentials. Here, `--skip-auth` is strictly unsigned; `--optional-auth` provides a best-effort signing fallback for mixed endpoints.
 
-{{< note >}}This table reflects the upstream CLI as documented in [aws/mcp-proxy-for-aws](https://github.com/aws/mcp-proxy-for-aws). Upstream remains canonical for flag semantics and signing behavior — when in doubt, defer to it.{{< /note >}}
+{{< note >}}This table uses [aws/mcp-proxy-for-aws](https://github.com/aws/mcp-proxy-for-aws) as its comparison point. The entries marked “Added here” intentionally define this proxy’s different authentication behavior.{{< /note >}}

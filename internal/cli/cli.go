@@ -57,10 +57,14 @@ type app struct {
 	ToolTimeout    *float64 `name:"tool-timeout" help:"Maximum seconds a tool call may take before cancellation."`
 
 	DisableTelemetry *bool `name:"disable-telemetry" help:"Disable client telemetry in outbound user-agent data."`
-	SkipAuth         *bool `name:"skip-auth" help:"Send unsigned requests when AWS credentials are unavailable."`
+	SkipAuth         *bool `name:"skip-auth" help:"Always send unsigned requests without loading AWS credentials."`
+	OptionalAuth     *bool `name:"optional-auth" help:"Sign requests when AWS credentials are available; otherwise send unsigned requests."`
 }
 
 func (a *app) Run(ctx context.Context, lookupEnv LookupEnv, runProxy RunProxy, stderr io.Writer) error {
+	if enabled(a.SkipAuth) && enabled(a.OptionalAuth) {
+		return errors.New("--skip-auth and --optional-auth cannot be used together")
+	}
 	cfg := a.config(lookupEnv)
 	return runProxy(ctx, cfg, newLogger(valueOr(a.LogLevel, "ERROR"), stderr))
 }
@@ -177,6 +181,7 @@ func (a app) config(lookupEnv LookupEnv) proxy.Config {
 		ToolTimeout:      seconds(a.ToolTimeout),
 		DisableTelemetry: a.DisableTelemetry,
 		SkipAuth:         a.SkipAuth,
+		OptionalAuth:     a.OptionalAuth,
 	}
 	profiles := dedupe(a.Profiles)
 	if len(profiles) > 0 {
@@ -194,6 +199,10 @@ func value[T any](ptr *T) T {
 		return zero
 	}
 	return *ptr
+}
+
+func enabled(value *bool) bool {
+	return value != nil && *value
 }
 
 func valueOr[T any](ptr *T, fallback T) T {

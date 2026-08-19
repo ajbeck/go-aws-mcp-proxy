@@ -37,6 +37,8 @@ For an unsigned endpoint, such as the public AWS documentation MCP server, skip 
 
 {{< command >}}aws-mcp-proxy https://aws-mcp.us-east-1.api.aws/mcp --skip-auth{{< /command >}}
 
+`--skip-auth` is strict: it does not load AWS credentials and sends every upstream request unsigned. For an endpoint that accepts either signed or unsigned traffic, use `--optional-auth` instead.
+
 ## Region or service not detected
 
 The SigV4 service and region are inferred from the endpoint host, including `*.api.aws` and `bedrock-agentcore` endpoints. For a host that doesn't follow those patterns, set them explicitly:

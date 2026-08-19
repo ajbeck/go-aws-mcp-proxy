@@ -164,13 +164,40 @@ func (r *proxyRun) ensureUpstreamMiddleware() mcp.Middleware {
 				return next(ctx, method, req)
 			}
 			if r.upstream.Session() == nil {
-				if _, err := r.ensureUpstreamReady(ctx, r.profiles.InitializeParams()); err != nil {
+				if _, err := r.ensureUpstreamReady(ctx, initializeParamsForRequest(req)); err != nil {
 					return nil, classifyError(err)
 				}
 			}
 			return next(ctx, method, req)
 		}
 	}
+}
+
+// initializeParamsForRequest returns the client metadata for either supported
+// MCP protocol era. Legacy clients provide it in the initialize request;
+// modern clients provide it in each request's _meta field.
+func initializeParamsForRequest(req mcp.Request) *mcp.InitializeParams {
+	if params, ok := req.GetParams().(*mcp.InitializeParams); ok {
+		return params
+	}
+
+	type clientMetadataRequest interface {
+		ClientCapabilities() *mcp.ClientCapabilities
+		ClientInfo() *mcp.Implementation
+		ProtocolVersion() string
+	}
+	if request, ok := req.(clientMetadataRequest); ok {
+		return &mcp.InitializeParams{
+			Capabilities:    request.ClientCapabilities(),
+			ClientInfo:      request.ClientInfo(),
+			ProtocolVersion: request.ProtocolVersion(),
+		}
+	}
+
+	if session, ok := req.GetSession().(*mcp.ServerSession); ok {
+		return session.InitializeParams()
+	}
+	return nil
 }
 
 func (r *proxyRun) ensureUpstreamReady(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
@@ -405,7 +432,11 @@ func (r *proxyRun) connectUpstream(ctx context.Context, params *mcp.InitializePa
 		return nil, err
 	}
 	r.profiles.SetInitializeParams(params)
-	r.upstream.Set(session, params.ClientInfo)
+	var clientInfo *mcp.Implementation
+	if params != nil {
+		clientInfo = params.ClientInfo
+	}
+	r.upstream.Set(session, clientInfo)
 	return session, nil
 }
 
@@ -636,7 +667,11 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 			return nil, err
 		}
 	}
-	if !enabled(cfg.SkipAuth) {
+	mode, err := authModeFor(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if mode == authModeRequired {
 		if cfg.Service == nil {
 			return nil, missingConfigError("service", reasonMissingService)
 		}
@@ -669,8 +704,9 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 	retries := retryCount(cfg.Retries)
 	for attempt := 0; ; attempt++ {
 		session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-			Endpoint:   endpoint,
-			HTTPClient: httpClient,
+			Endpoint:             endpoint,
+			HTTPClient:           httpClient,
+			DisableStandaloneSSE: true,
 		}, nil)
 		if err == nil {
 			return session, nil

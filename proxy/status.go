@@ -72,14 +72,21 @@ func (r *proxyRun) proxyStatus(ctx context.Context) *mcp.CallToolResult {
 	status := "connected"
 	endpoint := value(r.config.Endpoint)
 	signingMode := "signed"
-	credentialsRequired := !enabled(r.config.SkipAuth)
 	var credentialsAvailable any
 	var proxyErr *proxyError
 
-	if err := r.checkSigningCredentials(ctx); err != nil {
+	mode, err := authModeFor(r.config)
+	credentialsRequired := mode == authModeRequired
+	if err != nil {
+		status = "degraded"
+		proxyErr = classifyError(err)
+	} else if mode == authModeSkipped {
+		signingMode = "unsigned"
+		credentialsRequired = false
+	} else if err := r.checkSigningCredentials(ctx); err != nil {
 		credentialsAvailable = false
 		proxyErr = classifyError(err)
-		if enabled(r.config.SkipAuth) && proxyErr.reason == reasonCredentialUnavailable {
+		if mode == authModeOptional && proxyErr.reason == reasonCredentialUnavailable {
 			signingMode = "unsigned"
 			proxyErr = nil
 		} else {
