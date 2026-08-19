@@ -82,6 +82,27 @@ func TestRunBindsDependenciesIntoAppRun(t *testing.T) {
 	}
 }
 
+func TestRunRejectsConflictingAuthModes(t *testing.T) {
+	var stderr bytes.Buffer
+
+	code := Run(t.Context(), []string{
+		"https://service.us-east-1.api.aws/mcp",
+		"--skip-auth",
+		"--optional-auth",
+	}, Options{
+		LookupEnv: lookupEnv(nil),
+		RunProxy:  (&fakeProxyRun{}).call,
+		Stderr:    &stderr,
+	})
+
+	if code == exitOK {
+		t.Fatalf("Run() code = %d, want non-zero for conflicting auth modes", code)
+	}
+	if !strings.Contains(stderr.String(), "cannot be used together") {
+		t.Fatalf("Run() stderr = %q, want conflicting auth modes error", stderr.String())
+	}
+}
+
 func TestNewLoggerHonorsLogLevel(t *testing.T) {
 	var stderr bytes.Buffer
 	logger := newLogger("DEBUG", &stderr)
@@ -113,6 +134,7 @@ func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
 		ToolTimeout:      new(5.0),
 		DisableTelemetry: new(true),
 		SkipAuth:         new(true),
+		OptionalAuth:     new(true),
 	}.config(lookupEnv(map[string]string{"AWS_REGION": "eu-west-1"}))
 
 	if cfg.Service == nil || *cfg.Service != "service" {
@@ -146,7 +168,7 @@ func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
 		cfg.WriteTimeout == nil || *cfg.WriteTimeout != 4*time.Second || cfg.ToolTimeout == nil || *cfg.ToolTimeout != 5*time.Second {
 		t.Fatalf("unexpected timeouts: %+v", cfg)
 	}
-	if cfg.DisableTelemetry == nil || !*cfg.DisableTelemetry || cfg.SkipAuth == nil || !*cfg.SkipAuth {
+	if cfg.DisableTelemetry == nil || !*cfg.DisableTelemetry || cfg.SkipAuth == nil || !*cfg.SkipAuth || cfg.OptionalAuth == nil || !*cfg.OptionalAuth {
 		t.Fatalf("expected disable telemetry and skip auth: %+v", cfg)
 	}
 }

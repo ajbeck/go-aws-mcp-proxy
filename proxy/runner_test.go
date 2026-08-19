@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -107,7 +110,7 @@ func (rt headerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error
 	return rt.base.RoundTrip(req)
 }
 
-func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
+func TestRunConnectsUpstreamDuringToolsList(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	upstreamCaps := &mcp.ServerCapabilities{
 		Tools:     &mcp.ToolCapabilities{ListChanged: true},
@@ -135,8 +138,11 @@ func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
 		t.Fatalf("client.Connect() error = %v", err)
 	}
 
+	if _, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{}); err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
 	if !connector.called {
-		t.Fatal("upstream connector was not called")
+		t.Fatal("upstream connector was not called during tools/list")
 	}
 	if connector.cfg.Endpoint == nil || *connector.cfg.Endpoint != "https://service.us-east-1.api.aws/mcp" {
 		t.Fatalf("connector endpoint = %#v", connector.cfg.Endpoint)
@@ -147,14 +153,6 @@ func TestRunConnectsUpstreamDuringInitialize(t *testing.T) {
 	if connector.params.ClientInfo.Name != "test-client" {
 		t.Fatalf("client info name = %q", connector.params.ClientInfo.Name)
 	}
-	gotCaps := clientSession.InitializeResult().Capabilities
-	if gotCaps == nil || gotCaps.Tools == nil || gotCaps.Resources == nil {
-		t.Fatalf("capabilities were not replaced with upstream capabilities: %#v", gotCaps)
-	}
-	if !gotCaps.Tools.ListChanged || !gotCaps.Resources.ListChanged {
-		t.Fatalf("unexpected capabilities: %#v", gotCaps)
-	}
-
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
@@ -361,7 +359,7 @@ func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
 	}
 }
 
-func TestRunRegistersToolsWhenStandaloneSSEIsUnsupported(t *testing.T) {
+func TestRunRegistersToolsWithoutStandaloneSSE(t *testing.T) {
 	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
 	upstream.AddTool(&mcp.Tool{
 		Name:        "upstream-tool",
@@ -412,13 +410,183 @@ func TestRunRegistersToolsWhenStandaloneSSEIsUnsupported(t *testing.T) {
 	if findTool(tools.Tools, "upstream-tool") == nil {
 		t.Fatalf("tools = %#v, want registered upstream tool", tools.Tools)
 	}
-	if getRequests.Load() != 1 {
-		t.Fatalf("standalone SSE GET requests = %d, want 1", getRequests.Load())
+	if getRequests.Load() != 0 {
+		t.Fatalf("standalone SSE GET requests = %d, want 0", getRequests.Load())
 	}
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
 	waitForProxyRunExit(t, ctx, errs)
+}
+
+func TestRunWithSkipAuthSendsUnsignedRequestsForSessionLifecycle(t *testing.T) {
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
+	upstream.AddTool(&mcp.Tool{
+		Name:        "upstream-tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return upstream
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	type upstreamRequest struct {
+		method        string
+		authorization string
+	}
+	var requestsMu sync.Mutex
+	var requests []upstreamRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requestsMu.Lock()
+		requests = append(requests, upstreamRequest{
+			method:        req.Method,
+			authorization: req.Header.Get("Authorization"),
+		})
+		requestsMu.Unlock()
+		handler.ServeHTTP(w, req)
+	}))
+	t.Cleanup(server.Close)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	credentials := &staticCredentials{creds: aws.Credentials{
+		AccessKeyID:     "AKIA",
+		SecretAccessKey: "secret",
+	}}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	errs := make(chan error, 1)
+	go func() {
+		errs <- Run(ctx, Config{
+			Endpoint: new(server.URL),
+			SkipAuth: new(true),
+		}, RunOptions{
+			Transport:   serverTransport,
+			Version:     "test-version",
+			credentials: credentials,
+		})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	if _, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{}); err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	if _, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "upstream-tool"}); err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errs)
+
+	if credentials.called {
+		t.Fatal("credentials were retrieved for --skip-auth")
+	}
+	requestsMu.Lock()
+	defer requestsMu.Unlock()
+	var postRequests, deleteRequests int
+	for _, request := range requests {
+		if request.authorization != "" {
+			t.Errorf("%s Authorization = %q, want unsigned request", request.method, request.authorization)
+		}
+		switch request.method {
+		case http.MethodPost:
+			postRequests++
+		case http.MethodDelete:
+			deleteRequests++
+		}
+	}
+	if postRequests < 3 {
+		t.Errorf("upstream POST requests = %d, want at least initialize, tools/list, and tools/call", postRequests)
+	}
+	if deleteRequests != 1 {
+		t.Errorf("upstream DELETE requests = %d, want 1 teardown request", deleteRequests)
+	}
+}
+
+func TestRunWithSkipAuthSendsUnsignedCancellationNotification(t *testing.T) {
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
+	upstream.AddTool(&mcp.Tool{
+		Name:        "slow-tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(ctx context.Context, _ *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+	handler := mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return upstream
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true})
+
+	type upstreamRequest struct {
+		body          string
+		authorization string
+	}
+	var requestsMu sync.Mutex
+	var requests []upstreamRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		body, err := io.ReadAll(req.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		req.Body = io.NopCloser(bytes.NewReader(body))
+		requestsMu.Lock()
+		requests = append(requests, upstreamRequest{
+			body:          string(body),
+			authorization: req.Header.Get("Authorization"),
+		})
+		requestsMu.Unlock()
+		handler.ServeHTTP(w, req)
+	}))
+	t.Cleanup(server.Close)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	errs := make(chan error, 1)
+	go func() {
+		errs <- Run(ctx, Config{
+			Endpoint:    new(server.URL),
+			SkipAuth:    new(true),
+			ToolTimeout: new(50 * time.Millisecond),
+		}, RunOptions{
+			Transport: serverTransport,
+			Version:   "test-version",
+		})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "slow-tool"})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("CallTool() IsError = false, want timeout result: %#v", result)
+	}
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errs)
+
+	requestsMu.Lock()
+	defer requestsMu.Unlock()
+	for _, request := range requests {
+		if request.authorization != "" {
+			t.Errorf("Authorization = %q, want unsigned request", request.authorization)
+		}
+		if strings.Contains(request.body, "notifications/cancelled") {
+			return
+		}
+	}
+	t.Fatalf("upstream requests = %#v, want unsigned notifications/cancelled request", requests)
 }
 
 func TestRunDegradesWhenSigningCredentialsAreUnavailable(t *testing.T) {
@@ -481,89 +649,76 @@ func TestRunDegradesWhenSigningCredentialsAreUnavailable(t *testing.T) {
 	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestProxyStatusWithSkipAuthReportsCurrentSigningMode(t *testing.T) {
-	tests := []struct {
-		name     string
-		provider credentialsProvider
-		wantMode string
-		wantHave bool
-	}{
-		{
-			name: "signs when credentials are available",
-			provider: &staticCredentials{creds: aws.Credentials{
-				AccessKeyID:     "AKIA",
-				SecretAccessKey: "secret",
-			}},
-			wantMode: "signed",
-			wantHave: true,
-		},
-		{
-			name:     "uses unsigned requests when credentials are unavailable",
-			provider: &staticCredentials{err: errors.New("credentials unavailable")},
-			wantMode: "unsigned",
-			wantHave: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			run := proxyRun{
-				config: Config{
-					Service:  new("aws-mcp"),
-					Region:   new("us-east-1"),
-					SkipAuth: new(true),
-				},
-				credentials: tt.provider,
-			}
-			status := run.proxyStatus(t.Context()).StructuredContent.(map[string]any)
-			if status["status"] != "connected" {
-				t.Fatalf("status = %#v, want connected", status["status"])
-			}
-			if status["signing_mode"] != tt.wantMode {
-				t.Fatalf("signing_mode = %#v, want %q", status["signing_mode"], tt.wantMode)
-			}
-			if status["credentials_available"] != tt.wantHave {
-				t.Fatalf("credentials_available = %#v, want %t", status["credentials_available"], tt.wantHave)
-			}
-		})
-	}
-}
-
-func TestProxyStatusRequestsReconnectWhenCredentialsBecomeAvailableAfterDegradedInitialize(t *testing.T) {
-	serverTransport, clientTransport := mcp.NewInMemoryTransports()
-	credentials := &staticCredentials{err: errors.New("no AWS credentials")}
-	options := RunOptions{
-		Transport:   serverTransport,
-		Version:     "test-version",
+func TestProxyStatusWithSkipAuthDoesNotCheckCredentials(t *testing.T) {
+	credentials := &staticCredentials{creds: aws.Credentials{
+		AccessKeyID:     "AKIA",
+		SecretAccessKey: "secret",
+	}}
+	run := proxyRun{
+		config:      Config{SkipAuth: new(true)},
 		credentials: credentials,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
+	status := run.proxyStatus(t.Context()).StructuredContent.(map[string]any)
+	if status["status"] != "connected" {
+		t.Fatalf("status = %#v, want connected", status["status"])
+	}
+	if status["signing_mode"] != "unsigned" {
+		t.Fatalf("signing_mode = %#v, want unsigned", status["signing_mode"])
+	}
+	if status["credentials_required"] != false {
+		t.Fatalf("credentials_required = %#v, want false", status["credentials_required"])
+	}
+	if status["credentials_available"] != nil {
+		t.Fatalf("credentials_available = %#v, want nil", status["credentials_available"])
+	}
+	if credentials.called {
+		t.Fatal("credentials were retrieved for --skip-auth status")
+	}
+}
 
-	errs := make(chan error, 1)
-	go func() {
-		errs <- Run(ctx, Config{
+func TestProxyStatusWithOptionalAuthReportsUnsignedWhenCredentialsAreUnavailable(t *testing.T) {
+	run := proxyRun{
+		config: Config{
+			Service:      new("aws-mcp"),
+			Region:       new("us-east-1"),
+			OptionalAuth: new(true),
+		},
+		credentials: &staticCredentials{err: errors.New("credentials unavailable")},
+	}
+
+	status := run.proxyStatus(t.Context()).StructuredContent.(map[string]any)
+	if status["status"] != "connected" {
+		t.Fatalf("status = %#v, want connected", status["status"])
+	}
+	if status["signing_mode"] != "unsigned" {
+		t.Fatalf("signing_mode = %#v, want unsigned", status["signing_mode"])
+	}
+	if status["credentials_required"] != false {
+		t.Fatalf("credentials_required = %#v, want false", status["credentials_required"])
+	}
+	if status["credentials_available"] != false {
+		t.Fatalf("credentials_available = %#v, want false", status["credentials_available"])
+	}
+}
+
+func TestProxyStatusRequestsReconnectWhenCredentialsBecomeAvailableAfterDegradedConnect(t *testing.T) {
+	credentials := &staticCredentials{err: errors.New("no AWS credentials")}
+	run := proxyRun{
+		config: Config{
 			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
 			Service:  new("aws-mcp"),
 			Region:   new("us-east-1"),
-		}, options)
-	}()
-
-	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
-	clientSession, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
+		},
+		credentials: credentials,
 	}
+	run.upstream.Set(degradedUpstreamSession{err: credentials.err}, nil)
 
 	credentials.err = nil
 	credentials.creds.AccessKeyID = "AKIA"
 	credentials.creds.SecretAccessKey = "secret"
 
-	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: proxyStatusToolName})
-	if err != nil {
-		t.Fatalf("CallTool(%q) error = %v", proxyStatusToolName, err)
-	}
+	result := run.proxyStatus(t.Context())
 	status := result.StructuredContent.(map[string]any)
 	if status["reason"] != reasonReconnectNeeded {
 		t.Fatalf("reason = %#v, want reconnect required", status["reason"])
@@ -572,11 +727,6 @@ func TestProxyStatusRequestsReconnectWhenCredentialsBecomeAvailableAfterDegraded
 	if !strings.Contains(text, "restart or reconnect") {
 		t.Fatalf("status text = %q, want reconnect guidance", text)
 	}
-
-	if err := clientSession.Close(); err != nil {
-		t.Fatalf("clientSession.Close() error = %v", err)
-	}
-	waitForProxyRunExit(t, ctx, errs)
 }
 
 func TestDefaultConnectorRetriesInitialize(t *testing.T) {
@@ -1347,7 +1497,7 @@ func TestRunAppliesToolTimeout(t *testing.T) {
 	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRunReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
+func TestRunReturnsUpstreamConnectErrorDuringToolsList(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	wantErr := errors.New("connect failed")
 	connector := &fakeConnector{err: wantErr}
@@ -1366,12 +1516,15 @@ func TestRunReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
-	_, err := client.Connect(ctx, clientTransport, nil)
-	if err == nil {
-		t.Fatal("client.Connect() error = nil")
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	if _, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{}); err == nil {
+		t.Fatal("ListTools() error = nil")
 	}
 	if !connector.called {
-		t.Fatal("upstream connector was not called")
+		t.Fatal("upstream connector was not called during tools/list")
 	}
 
 	cancel()

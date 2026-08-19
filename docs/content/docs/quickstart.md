@@ -12,7 +12,7 @@ The public AWS documentation MCP endpoint can be queried without SigV4 signing. 
 
 {{< command >}}aws-mcp-proxy https://aws-mcp.us-east-1.api.aws/mcp --skip-auth{{< /command >}}
 
-The proxy speaks stdio to your MCP client and forwards signed (or, with `--skip-auth`, unsigned) traffic to the remote Streamable HTTP endpoint.
+The proxy speaks stdio to your MCP client and forwards traffic to the remote Streamable HTTP endpoint. `--skip-auth` makes every upstream request unsigned and does not load AWS credentials.
 
 ## Run against a signed endpoint
 
@@ -22,7 +22,11 @@ Drop `--skip-auth` and point the proxy at an IAM-authenticated endpoint. Credent
 aws-mcp-proxy https://<your-endpoint>.api.aws/mcp --profile <profile> --region us-east-1
 ```
 
-{{< note >}}These flags mirror the upstream CLI. For the complete, canonical list of flags and signing behavior, see [aws/mcp-proxy-for-aws](https://github.com/aws/mcp-proxy-for-aws).{{< /note >}}
+{{< note >}}The proxy follows the upstream CLI where practical. See [parity with upstream](/docs/parity/) for the deliberate authentication-mode differences.{{< /note >}}
+
+## Use best-effort optional authentication
+
+`--optional-auth` signs when credentials are available and otherwise sends unsigned requests. Use it only when an endpoint accepts both forms; it cannot be combined with `--skip-auth`.
 
 ## Wire it into an MCP client
 
