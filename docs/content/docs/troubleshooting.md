@@ -5,7 +5,6 @@ description: TLS interception, credentials, and endpoint issues — and how to r
 weight: 40
 kicker: Documentation
 ---
-
 ## TLS: certificate signed by unknown authority
 
 On a corporate network, a TLS-intercepting proxy — such as Zscaler or Cloudflare WARP — terminates HTTPS and re-signs it with an internal certificate authority. If that CA isn't in the trust store, connecting to the endpoint fails with:
@@ -32,6 +31,19 @@ The bundle is trusted _in addition to_ the system roots, so first-party AWS endp
 Signed endpoints need AWS credentials from the standard chain — environment variables, shared config, a named profile, or SSO. If none are found, the request can't be signed. Supply a profile:
 
 {{< command >}}aws-mcp-proxy https://<endpoint>.api.aws/mcp --profile my-profile{{< /command >}}
+
+Assume-role and chained-role profiles use the AWS shared-config chain without
+special proxy flags. Confirm the final profile independently, then use that same
+profile with the proxy:
+
+```bash
+aws sts get-caller-identity --profile <final-role-profile>
+aws-mcp-proxy https://<endpoint>.api.aws/mcp --profile <final-role-profile>
+```
+
+If the final role uses a `source_profile` backed by `credential_process`, the
+proxy resolves the process credentials before calling STS. Credential processes
+cannot read the proxy's MCP stdio stream.
 
 For an unsigned endpoint, such as the public AWS documentation MCP server, skip signing entirely:
 
