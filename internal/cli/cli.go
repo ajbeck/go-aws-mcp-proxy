@@ -52,11 +52,11 @@ type app struct {
 	LogLevel *string `name:"log-level" enum:"DEBUG,INFO,WARNING,ERROR,CRITICAL" help:"Set the logging level."`
 	Retries  *int    `help:"Number of retries for connection, discovery, and stream recovery. Defaults to 3; 0 disables retries."`
 
-	Timeout        *float64 `help:"Total timeout in seconds when connecting to endpoint."`
-	ConnectTimeout *float64 `name:"connect-timeout" help:"Connection timeout in seconds."`
-	ReadTimeout    *float64 `name:"read-timeout" help:"Read timeout in seconds."`
-	WriteTimeout   *float64 `name:"write-timeout" help:"Write timeout in seconds."`
-	ToolTimeout    *float64 `name:"tool-timeout" help:"Maximum seconds a tool call may take before cancellation."`
+	Timeout        *float64 `default:"180" help:"Total timeout in seconds when connecting to endpoint. Defaults to 180."`
+	ConnectTimeout *float64 `name:"connect-timeout" default:"60" help:"Connection timeout in seconds. Defaults to 60."`
+	ReadTimeout    *float64 `name:"read-timeout" default:"120" help:"Read timeout in seconds. Defaults to 120."`
+	WriteTimeout   *float64 `name:"write-timeout" default:"180" help:"Write timeout in seconds. Defaults to 180."`
+	ToolTimeout    *float64 `name:"tool-timeout" default:"300" help:"Maximum seconds a tool call may take before cancellation. Defaults to 300."`
 
 	DisableTelemetry *bool `name:"disable-telemetry" help:"Disable client telemetry in outbound user-agent data."`
 	SkipAuth         *bool `name:"skip-auth" help:"Always send unsigned requests without loading AWS credentials."`
@@ -64,14 +64,32 @@ type app struct {
 }
 
 func (a *app) Run(ctx context.Context, lookupEnv LookupEnv, runProxy RunProxy, stderr io.Writer) error {
+	if err := a.Validate(); err != nil {
+		return err
+	}
+	cfg := a.config(lookupEnv)
+	return runProxy(ctx, cfg, newLogger(valueOr(a.LogLevel, "ERROR"), stderr))
+}
+
+func (a app) Validate() error {
 	if enabled(a.SkipAuth) && enabled(a.OptionalAuth) {
 		return errors.New("--skip-auth and --optional-auth cannot be used together")
 	}
 	if a.Retries != nil && (*a.Retries < 0 || *a.Retries > 10) {
 		return fmt.Errorf("--retries must be between 0 and 10, got %d", *a.Retries)
 	}
-	cfg := a.config(lookupEnv)
-	return runProxy(ctx, cfg, newLogger(valueOr(a.LogLevel, "ERROR"), stderr))
+	for name, value := range map[string]*float64{
+		"--timeout":         a.Timeout,
+		"--connect-timeout": a.ConnectTimeout,
+		"--read-timeout":    a.ReadTimeout,
+		"--write-timeout":   a.WriteTimeout,
+		"--tool-timeout":    a.ToolTimeout,
+	} {
+		if value != nil && *value < 0 {
+			return fmt.Errorf("%s must be greater than or equal to 0, got %g", name, *value)
+		}
+	}
+	return nil
 }
 
 func Run(ctx context.Context, args []string, options Options) int {
