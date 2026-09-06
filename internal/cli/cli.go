@@ -19,16 +19,23 @@ import (
 )
 
 const (
-	exitOK    = 0
-	exitError = 1
+	exitOK            = 0
+	exitError         = 1
+	exitConfiguration = 2
+	exitCredentials   = 3
+	exitNetwork       = 4
+	exitUpstream      = 5
 )
 
 type RunProxy func(context.Context, proxy.Config, *slog.Logger) error
+
+type RunDoctor func(context.Context, proxy.Config, proxy.DiagnoseOptions) proxy.DiagnosticReport
 
 type LookupEnv func(string) (string, bool)
 
 type Options struct {
 	LookupEnv LookupEnv
+	RunDoctor RunDoctor
 	RunProxy  RunProxy
 	Stderr    io.Writer
 	Stdout    io.Writer
@@ -38,6 +45,10 @@ type Options struct {
 type app struct {
 	Version kong.VersionFlag `help:"Print version information and exit."`
 
+	proxyArguments `embed:""`
+}
+
+type proxyArguments struct {
 	Endpoint *string `arg:"" help:"SigV4 MCP endpoint URL."`
 
 	Service  *string  `help:"AWS service name for SigV4 signing. Inferred from endpoint when omitted."`
@@ -65,6 +76,30 @@ type app struct {
 	OptionalAuth     *bool `name:"optional-auth" help:"Sign requests when AWS credentials are available; otherwise send unsigned requests."`
 }
 
+type doctorCommand struct {
+	proxyArguments `embed:""`
+
+	JSON  bool `help:"Write a stable JSON diagnostic report."`
+	Probe bool `help:"Connect to the MCP endpoint and run initialize plus tools/list."`
+}
+
+type doctorWriters struct {
+	stderr io.Writer
+	stdout io.Writer
+}
+
+type cliVersion string
+
+type doctorExitError int
+
+func (e doctorExitError) Error() string {
+	return "doctor found one or more failures"
+}
+
+func (e doctorExitError) ExitCode() int {
+	return int(e)
+}
+
 func (a *app) Run(ctx context.Context, lookupEnv LookupEnv, runProxy RunProxy, stderr io.Writer) error {
 	if err := a.Validate(); err != nil {
 		return err
@@ -73,7 +108,7 @@ func (a *app) Run(ctx context.Context, lookupEnv LookupEnv, runProxy RunProxy, s
 	return runProxy(ctx, cfg, newLogger(valueOr(a.LogLevel, "ERROR"), stderr))
 }
 
-func (a app) Validate() error {
+func (a proxyArguments) Validate() error {
 	if enabled(a.SkipAuth) && enabled(a.OptionalAuth) {
 		return errors.New("--skip-auth and --optional-auth cannot be used together")
 	}
@@ -94,23 +129,66 @@ func (a app) Validate() error {
 	return nil
 }
 
+func (d *doctorCommand) Run(ctx context.Context, lookupEnv LookupEnv, runDoctor RunDoctor, writers *doctorWriters, version cliVersion) error {
+	if err := d.Validate(); err != nil {
+		return err
+	}
+	cfg := d.config(lookupEnv)
+	var logger *slog.Logger
+	if d.LogLevel != nil {
+		logger = newLogger(*d.LogLevel, writers.stderr)
+	}
+	report := runDoctor(ctx, cfg, proxy.DiagnoseOptions{
+		Logger:  logger,
+		Probe:   d.Probe,
+		Version: string(version),
+	})
+	if err := report.Validate(); err != nil {
+		return err
+	}
+	if d.JSON {
+		if err := writeDiagnosticJSON(writers.stdout, report); err != nil {
+			return err
+		}
+	} else {
+		if err := writeDiagnosticText(writers.stdout, report); err != nil {
+			return err
+		}
+	}
+	if code := diagnosticExitCode(report); code != exitOK {
+		return doctorExitError(code)
+	}
+	return nil
+}
+
 func Run(ctx context.Context, args []string, options Options) int {
 	options = options.withDefaults()
+	writers := &doctorWriters{stderr: options.Stderr, stdout: options.Stdout}
 
 	var application app
+	grammar := any(&application)
+	commandName := "aws-mcp-proxy"
+	description := "MCP Proxy for AWS. Run 'aws-mcp-proxy doctor --help' for preflight diagnostics."
+	doctorMode := len(args) > 0 && args[0] == "doctor"
+	if doctorMode {
+		grammar = &doctorCommand{}
+		commandName = "aws-mcp-proxy doctor"
+		description = "Diagnose AWS MCP proxy configuration, identity, and optional endpoint connectivity."
+		args = args[1:]
+	}
 	var exitCode int
 	exited := false
 
 	parser, err := kong.New(
-		&application,
-		kong.Name("aws-mcp-proxy"),
-		kong.Description("MCP Proxy for AWS"),
+		grammar,
+		kong.Name(commandName),
+		kong.Description(description),
 		kong.UsageOnError(),
 		kong.WithHyphenPrefixedParameters(true),
 		kong.NamedMapper("grouped-strings", kong.MapperFunc(decodeGroupedStrings)),
 		kong.NamedMapper("grouped-map", kong.MapperFunc(decodeGroupedMap)),
 		kong.Vars{"version": options.Version},
-		kong.Bind(options.LookupEnv, options.RunProxy),
+		kong.Bind(options.LookupEnv, options.RunDoctor, options.RunProxy, writers, cliVersion(options.Version)),
 		kong.BindTo(ctx, (*context.Context)(nil)),
 		kong.BindTo(options.Stderr, (*io.Writer)(nil)),
 		kong.Writers(options.Stdout, options.Stderr),
@@ -130,10 +208,19 @@ func Run(ctx context.Context, args []string, options Options) int {
 	}
 	if err != nil {
 		fmt.Fprintln(options.Stderr, err)
+		if doctorMode {
+			return exitConfiguration
+		}
 		return exitCodeForError(err)
 	}
 	if err := kctx.Run(); err != nil {
+		if _, ok := errors.AsType[doctorExitError](err); ok {
+			return exitCodeForError(err)
+		}
 		fmt.Fprintln(options.Stderr, err)
+		if doctorMode {
+			return exitConfiguration
+		}
 		return exitCodeForError(err)
 	}
 
@@ -141,6 +228,12 @@ func Run(ctx context.Context, args []string, options Options) int {
 }
 
 func exitCodeForError(err error) int {
+	if exitErr, ok := errors.AsType[interface {
+		error
+		ExitCode() int
+	}](err); ok {
+		return exitErr.ExitCode()
+	}
 	var parseErr *kong.ParseError
 	if errors.As(err, &parseErr) {
 		return parseErr.ExitCode()
@@ -154,6 +247,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Version == "" {
 		o.Version = "dev"
+	}
+	if o.RunDoctor == nil {
+		o.RunDoctor = proxy.Diagnose
 	}
 	if o.RunProxy == nil {
 		o.RunProxy = func(ctx context.Context, cfg proxy.Config, logger *slog.Logger) error {
@@ -210,7 +306,7 @@ func (nopWriteCloser) Close() error {
 	return nil
 }
 
-func (a app) config(lookupEnv LookupEnv) proxy.Config {
+func (a proxyArguments) config(lookupEnv LookupEnv) proxy.Config {
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
 	}
