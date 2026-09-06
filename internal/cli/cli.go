@@ -48,6 +48,7 @@ type app struct {
 	Metadata map[string]string `type:"grouped-map" help:"Metadata to inject into MCP requests as key=value pairs." placeholder:"KEY=VALUE"`
 
 	AllowEmptyTools *bool `name:"allow-empty-tools" help:"Allow an upstream endpoint to initialize with no tools."`
+	LazyConnect     *bool `name:"lazy-connect" help:"Defer credentials and the upstream connection until tools are requested."`
 	ReadOnly        *bool `name:"read-only" help:"Disable tools that do not advertise readOnlyHint=true."`
 
 	LogLevel *string `name:"log-level" enum:"DEBUG,INFO,WARNING,ERROR,CRITICAL" help:"Set the logging level."`
@@ -236,6 +237,7 @@ func (a app) config(lookupEnv LookupEnv) proxy.Config {
 		Region:           region,
 		CaBundle:         a.CaBundle,
 		AllowEmptyTools:  a.AllowEmptyTools,
+		LazyConnect:      a.LazyConnect,
 		ReadOnly:         a.ReadOnly,
 		LogLevel:         a.LogLevel,
 		Retries:          a.Retries,
