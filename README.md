@@ -19,7 +19,7 @@ The upstream proxy is distributed and documented as a Python package. The common
 install path is:
 
 ```bash
-uvx mcp-proxy-for-aws@latest <SigV4 MCP endpoint URL>
+uvx mcp-proxy-for-aws-cli@latest <SigV4 MCP endpoint URL>
 ```
 
 Local development and release workflows also rely on `uv`, Python packaging, and
@@ -155,8 +155,8 @@ and plugin packaging recommendation are tracked in
 The README update is based on these upstream observations:
 
 - [`aws/mcp-proxy-for-aws`](https://github.com/aws/mcp-proxy-for-aws) documents
-  `uvx mcp-proxy-for-aws@latest` for normal use and `uv run` / `uv sync` for
-  local development.
+  the version-pinned `mcp-proxy-for-aws-cli` distribution for `uvx` use and
+  reserves the unsuffixed package for library consumers.
 - The upstream `pyproject.toml` declares Python `>=3.10,<3.15` and dependencies
   on FastMCP, boto3, and botocore.
 - The upstream workflows install `uv`, run Python checks and tests, build Python
