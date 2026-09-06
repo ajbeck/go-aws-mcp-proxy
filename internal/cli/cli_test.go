@@ -82,6 +82,59 @@ func TestRunBindsDependenciesIntoAppRun(t *testing.T) {
 	}
 }
 
+func TestRunAcceptsGroupedProfilesAndMetadata(t *testing.T) {
+	run := &fakeProxyRun{}
+	var stderr bytes.Buffer
+
+	code := Run(t.Context(), []string{
+		"https://service.us-east-1.api.aws/mcp",
+		"--profile", "prod", "dev", "staging",
+		"--metadata", "A=1", "B=two=parts",
+		"--retries", "10",
+	}, Options{
+		LookupEnv: lookupEnv(nil),
+		RunProxy:  run.call,
+		Stderr:    &stderr,
+	})
+
+	if code != exitOK {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	if run.config.Profiles == nil || strings.Join(*run.config.Profiles, ",") != "prod,dev,staging" {
+		t.Fatalf("Profiles = %#v", run.config.Profiles)
+	}
+	if run.config.Metadata == nil || (*run.config.Metadata)["A"] != "1" || (*run.config.Metadata)["B"] != "two=parts" {
+		t.Fatalf("Metadata = %#v", run.config.Metadata)
+	}
+	if run.config.Retries == nil || *run.config.Retries != 10 {
+		t.Fatalf("Retries = %#v", run.config.Retries)
+	}
+}
+
+func TestRunValidatesRetryRange(t *testing.T) {
+	for _, retries := range []string{"-1", "11"} {
+		t.Run(retries, func(t *testing.T) {
+			run := &fakeProxyRun{}
+			var stderr bytes.Buffer
+			code := Run(t.Context(), []string{
+				"https://service.us-east-1.api.aws/mcp",
+				"--retries", retries,
+			}, Options{
+				LookupEnv: lookupEnv(nil),
+				RunProxy:  run.call,
+				Stderr:    &stderr,
+			})
+
+			if code == exitOK || run.called {
+				t.Fatalf("Run() code = %d, called = %v", code, run.called)
+			}
+			if !strings.Contains(stderr.String(), "between 0 and 10") {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunRejectsConflictingAuthModes(t *testing.T) {
 	var stderr bytes.Buffer
 
@@ -209,6 +262,61 @@ func TestAppConfigDedupesProfiles(t *testing.T) {
 	}
 	if got := strings.Join(*cfg.Profiles, ","); got != "default,dev" {
 		t.Fatalf("Profiles = %q", got)
+	}
+}
+
+func TestAppConfigUsesDocumentedProfilePrecedence(t *testing.T) {
+	tests := []struct {
+		name     string
+		cli      []string
+		env      map[string]string
+		want     string
+		wantNone bool
+	}{
+		{
+			name: "proxy_environment_overrides_cli_and_aws_profile",
+			cli:  []string{"cli"},
+			env: map[string]string{
+				"AWS_MCP_PROXY_PROFILES": "prod dev prod",
+				"AWS_PROFILE":            "legacy",
+			},
+			want: "prod,dev",
+		},
+		{
+			name: "cli_overrides_aws_profile",
+			cli:  []string{"cli"},
+			env:  map[string]string{"AWS_PROFILE": "legacy"},
+			want: "cli",
+		},
+		{
+			name: "aws_profile_is_fallback",
+			env:  map[string]string{"AWS_PROFILE": "legacy"},
+			want: "legacy",
+		},
+		{
+			name:     "empty_proxy_environment_still_overrides_cli",
+			cli:      []string{"cli"},
+			env:      map[string]string{"AWS_MCP_PROXY_PROFILES": ""},
+			wantNone: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := app{
+				Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+				Profiles: test.cli,
+			}.config(lookupEnv(test.env))
+			if test.wantNone {
+				if cfg.Profiles != nil {
+					t.Fatalf("Profiles = %#v, want nil", cfg.Profiles)
+				}
+				return
+			}
+			if cfg.Profiles == nil || strings.Join(*cfg.Profiles, ",") != test.want {
+				t.Fatalf("Profiles = %#v, want %q", cfg.Profiles, test.want)
+			}
+		})
 	}
 }
 
