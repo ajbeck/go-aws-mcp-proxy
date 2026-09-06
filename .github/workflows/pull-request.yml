@@ -10,6 +10,27 @@ permissions:
   contents: read
 
 jobs:
+  pull-request-title:
+    name: Release-compatible PR title
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Validate Conventional Commit title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          pattern='^(build|chore|ci|deps|docs|feat|fix|perf|refactor|revert|style|test)(\([^)]+\))?!?: .+'
+
+          if [[ "$PR_TITLE" =~ $pattern ]]; then
+            echo "Release-compatible pull request title: $PR_TITLE"
+            exit 0
+          fi
+
+          echo 'Pull request titles become release inputs and must use Conventional Commit syntax.'
+          echo 'Examples: fix: reject unsigned redirects, feat(doctor): add identity checks'
+          exit 1
+
   ci:
     name: CI
     strategy:

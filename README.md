@@ -144,6 +144,14 @@ source, follow the same path. The automated suite covers both a static
 `source_profile` and a `credential_process` source against a local STS fixture;
 the live smoke confirms the configured endpoint accepts the resulting signature.
 
+## Release process
+
+Release Please maintains the release pull request, changelog, version, tag, and
+GitHub Release. Merging the reviewed release pull request triggers verified
+cross-platform archives, checksums, SPDX SBOMs, and build attestations. See the
+[maintainer release process](https://aws-mcp-proxy.ajbeck.dev/docs/releases/)
+for title conventions, the `v1.0.0` transition, token setup, and asset recovery.
+
 Install from a GitHub release on Linux or macOS:
 
 ```bash

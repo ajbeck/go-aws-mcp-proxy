@@ -2,36 +2,11 @@
 
 All notable changes to `go-aws-mcp-proxy` are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Links in this file are absolute so they resolve identically on GitHub and on the [documentation site](https://aws-mcp-proxy.ajbeck.dev/).
-
-## [Unreleased](https://github.com/ajbeck/go-aws-mcp-proxy/compare/v0.4.0...HEAD)
-
-### Added
-
-- Explicit `--lazy-connect` support, with automatic deferred initialization for Kiro and Amazon Q clients.
-- `--allow-empty-tools` for upstream servers whose initial tool catalog is intentionally empty.
-- Cross-account profile routing for authenticated tools on EKS and other SigV4 MCP endpoints.
-- Build-provenance and SPDX SBOM attestations for release archives, plus SPDX JSON release assets.
-- Runnable Go embedding example for the supported `proxy.Run` API.
-- Non-mutating `aws-mcp-proxy doctor` diagnostics for configuration, AWS credential source and expiration, effective STS identity, and optional MCP connectivity.
-- Stable JSON doctor reports and exit codes for configuration, credential, network/TLS, and upstream MCP failures.
-- `proxy.Diagnose` for applications that need the same redacted preflight report without invoking the CLI.
-
-### Changed
-
-- Match upstream CLI timeout defaults: total 180s, connect 60s, read 120s, write 180s, and tool 300s.
-- Accept grouped `--profile` and `--metadata` values and apply `AWS_MCP_PROXY_PROFILES` precedence consistently.
-- Keep upstream tools synchronized after initialization, including pagination, additions, removals, schema changes, and list-change notifications.
-- Forward only MCP capabilities and elicitation behavior the proxy can actually support.
-- Restrict automatic retries to connection and discovery operations; tool calls are never replayed automatically.
-
-### Fixed
-
-- Reject signed and unsigned upstream redirects before following them.
-- Recover from credentials becoming available after deferred or degraded initialization.
-- Prevent `credential_process` children from reading the MCP stdio stream.
-- Preserve upstream-owned `aws_profile` tool arguments instead of shadowing them.
-- Treat transient HTTP, transport, session, and empty-catalog failures structurally, including bounded jitter and `Retry-After` handling.
+Release Please manages this file from merged pull requests. The project follows
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html), and links are
+absolute so they resolve identically on GitHub and on the
+[documentation site](https://aws-mcp-proxy.ajbeck.dev/). Pending changes live
+in the release pull request rather than in an `Unreleased` section on `main`.
 
 ## [0.4.0](https://github.com/ajbeck/go-aws-mcp-proxy/releases/tag/v0.4.0) - 2026-08-19
 
