@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -12,9 +13,9 @@ func TestDefaultBuildOutput(t *testing.T) {
 		goos string
 		want string
 	}{
-		{name: "unix", goos: "darwin", want: "bin/aws-mcp-proxy"},
-		{name: "linux", goos: "linux", want: "bin/aws-mcp-proxy"},
-		{name: "windows", goos: "windows", want: "bin/aws-mcp-proxy.exe"},
+		{name: "unix", goos: "darwin", want: filepath.Join("bin", "aws-mcp-proxy")},
+		{name: "linux", goos: "linux", want: filepath.Join("bin", "aws-mcp-proxy")},
+		{name: "windows", goos: "windows", want: filepath.Join("bin", "aws-mcp-proxy.exe")},
 	}
 
 	for _, tt := range tests {

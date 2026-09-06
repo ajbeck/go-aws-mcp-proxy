@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -390,6 +391,10 @@ func TestFreshCredentialsProviderResolvesAssumeRoleChains(t *testing.T) {
 					t.Fatalf("os.Executable() error = %v", err)
 				}
 				command := fmt.Sprintf(`"%s" -test.run=^TestCredentialProcessSourceHelper$`, strings.ReplaceAll(executable, `"`, `\"`))
+				if runtime.GOOS == "windows" {
+					// cmd.exe /C consumes an outer quote before parsing the quoted executable.
+					command = fmt.Sprintf(`""%s" -test.run=^TestCredentialProcessSourceHelper$"`, strings.ReplaceAll(executable, `"`, `\"`))
+				}
 				sharedConfig += fmt.Sprintf("\n[profile %s]\ncredential_process = %s\n", test.sourceProfile, command)
 			}
 
