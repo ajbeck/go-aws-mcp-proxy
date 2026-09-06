@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -328,6 +329,112 @@ func TestSigningRoundTripperRetrievesCredentialsForEveryRequest(t *testing.T) {
 	if credentials.calls != 2 {
 		t.Fatalf("credential retrievals = %d, want 2", credentials.calls)
 	}
+}
+
+func TestFreshCredentialsProviderResolvesAssumeRoleChains(t *testing.T) {
+	tests := []struct {
+		name              string
+		sourceProfile     string
+		sourceCredentials string
+		wantSourceKey     string
+		process           bool
+	}{
+		{
+			name:              "static source profile",
+			sourceProfile:     "static-source",
+			sourceCredentials: "[static-source]\naws_access_key_id = STATICKEY\naws_secret_access_key = static-secret\n",
+			wantSourceKey:     "STATICKEY",
+		},
+		{
+			name:          "credential process source profile",
+			sourceProfile: "process-source",
+			process:       true,
+			wantSourceKey: "PROCESSKEY",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var stsCalls atomic.Int64
+			stsServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				stsCalls.Add(1)
+				if err := req.ParseForm(); err != nil {
+					t.Errorf("ParseForm() error = %v", err)
+				}
+				if req.Form.Get("Action") != "AssumeRole" {
+					t.Errorf("STS Action = %q, want AssumeRole", req.Form.Get("Action"))
+				}
+				if authorization := req.Header.Get("Authorization"); !strings.Contains(authorization, "Credential="+test.wantSourceKey+"/") {
+					t.Errorf("STS Authorization = %q, want source access key %q", authorization, test.wantSourceKey)
+				}
+				w.Header().Set("Content-Type", "text/xml")
+				_, _ = io.WriteString(w, `<AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+<AssumeRoleResult>
+<Credentials>
+<AccessKeyId>ASSUMEDKEY</AccessKeyId>
+<SecretAccessKey>assumed-secret</SecretAccessKey>
+<SessionToken>assumed-token</SessionToken>
+<Expiration>2099-01-01T00:00:00Z</Expiration>
+</Credentials>
+<AssumedRoleUser><Arn>arn:aws:sts::123456789012:assumed-role/test/session</Arn><AssumedRoleId>id:session</AssumedRoleId></AssumedRoleUser>
+</AssumeRoleResult>
+<ResponseMetadata><RequestId>request-id</RequestId></ResponseMetadata>
+</AssumeRoleResponse>`)
+			}))
+			defer stsServer.Close()
+
+			sharedConfig := fmt.Sprintf("[profile assumed]\nrole_arn = arn:aws:iam::123456789012:role/test\nsource_profile = %s\nregion = us-east-1\n", test.sourceProfile)
+			if test.process {
+				executable, err := os.Executable()
+				if err != nil {
+					t.Fatalf("os.Executable() error = %v", err)
+				}
+				command := fmt.Sprintf(`"%s" -test.run=^TestCredentialProcessSourceHelper$`, strings.ReplaceAll(executable, `"`, `\"`))
+				sharedConfig += fmt.Sprintf("\n[profile %s]\ncredential_process = %s\n", test.sourceProfile, command)
+			}
+
+			configPath := filepath.Join(t.TempDir(), "config")
+			credentialsPath := filepath.Join(t.TempDir(), "credentials")
+			if err := os.WriteFile(configPath, []byte(sharedConfig), 0o600); err != nil {
+				t.Fatalf("write shared config: %v", err)
+			}
+			if err := os.WriteFile(credentialsPath, []byte(test.sourceCredentials), 0o600); err != nil {
+				t.Fatalf("write shared credentials: %v", err)
+			}
+
+			t.Setenv("AWS_CONFIG_FILE", configPath)
+			t.Setenv("AWS_SHARED_CREDENTIALS_FILE", credentialsPath)
+			t.Setenv("AWS_ENDPOINT_URL_STS", stsServer.URL)
+			t.Setenv("AWS_EC2_METADATA_DISABLED", "true")
+			t.Setenv("AWS_ACCESS_KEY_ID", "")
+			t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+			t.Setenv("AWS_SESSION_TOKEN", "")
+			t.Setenv("AWS_CREDENTIAL_PROCESS_SOURCE_HELPER", "1")
+
+			provider := freshCredentialsProvider{cfg: Config{
+				Profiles: new([]string{"assumed"}),
+				Region:   new("us-east-1"),
+			}}
+			credentials, err := provider.Retrieve(t.Context())
+			if err != nil {
+				t.Fatalf("Retrieve() error = %v", err)
+			}
+			if credentials.AccessKeyID != "ASSUMEDKEY" || credentials.SecretAccessKey != "assumed-secret" || credentials.SessionToken != "assumed-token" {
+				t.Fatalf("credentials = %#v", credentials)
+			}
+			if got := stsCalls.Load(); got != 1 {
+				t.Fatalf("STS calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestCredentialProcessSourceHelper(t *testing.T) {
+	if os.Getenv("AWS_CREDENTIAL_PROCESS_SOURCE_HELPER") != "1" {
+		return
+	}
+	fmt.Fprint(os.Stdout, `{"Version":1,"AccessKeyId":"PROCESSKEY","SecretAccessKey":"process-secret","SessionToken":"process-token"}`)
+	os.Exit(0)
 }
 
 func TestNewHTTPClientTrustsCABundle(t *testing.T) {

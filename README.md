@@ -118,6 +118,20 @@ Run a signed smoke manually by passing a configured AWS profile:
 go run ./cmd/scripts/main.go smoke:aws-mcp --skip-auth=false --profile <profile>
 ```
 
+The same smoke test exercises shared-config role resolution. Validate the
+identity first, then pass the role profile—not its source profile—to the proxy:
+
+```bash
+aws sts get-caller-identity --profile <assume-role-profile>
+go run ./cmd/scripts/main.go smoke:aws-mcp --skip-auth=false --profile <assume-role-profile>
+```
+
+Repeat those commands with the final profile in a chained-role configuration.
+Profiles backed by `credential_process`, including when used as an assume-role
+source, follow the same path. The automated suite covers both a static
+`source_profile` and a `credential_process` source against a local STS fixture;
+the live smoke confirms the configured endpoint accepts the resulting signature.
+
 Install from a GitHub release on Linux or macOS:
 
 ```bash
