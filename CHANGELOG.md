@@ -8,6 +8,26 @@ absolute so they resolve identically on GitHub and on the
 [documentation site](https://aws-mcp-proxy.ajbeck.dev/). Pending changes live
 in the release pull request rather than in an `Unreleased` section on `main`.
 
+## [1.0.0](https://github.com/ajbeck/go-aws-mcp-proxy/compare/v0.4.0...v1.0.0) (2026-09-06)
+
+
+### Features
+
+* add lazy connection and empty tool controls ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+* expose supported embedding and doctor diagnostic APIs ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+* publish release SBOMs and provenance attestations ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+* route authenticated tools across selected AWS profiles ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+
+
+### Bug Fixes
+
+* align CLI timeouts, grouped arguments, and profile precedence ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+* harden upstream HTTP redirects and transport failure classification ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+* isolate credential process input and preserve upstream profile fields ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+* recover deferred sessions and credentials without replaying tool calls ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+* support Windows credential process execution ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+* synchronize live upstream tool catalogs and capabilities ([1ad9978](https://github.com/ajbeck/go-aws-mcp-proxy/commit/1ad9978f0711f3ea6e3c9729563e4f146e5dfc00))
+
 ## [0.4.0](https://github.com/ajbeck/go-aws-mcp-proxy/releases/tag/v0.4.0) - 2026-08-19
 
 ### Added
