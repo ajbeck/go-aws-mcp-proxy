@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,6 +26,7 @@ type fakeConnector struct {
 	params            *mcp.InitializeParams
 	err               error
 	sess              *fakeSession
+	sessions          []*fakeSession
 	sessionsByProfile map[string]*fakeSession
 }
 
@@ -42,6 +44,13 @@ func (c *fakeConnector) Connect(_ context.Context, cfg Config, params *mcp.Initi
 			return sess, nil
 		}
 	}
+	if len(c.sessions) > 0 {
+		index := len(c.configs) - 1
+		if index >= len(c.sessions) {
+			index = len(c.sessions) - 1
+		}
+		return c.sessions[index], nil
+	}
 	return c.sess, nil
 }
 
@@ -49,6 +58,8 @@ type fakeSession struct {
 	closed             bool
 	result             *mcp.InitializeResult
 	tools              []*mcp.Tool
+	listResults        []*mcp.ListToolsResult
+	listCursors        []string
 	listCount          int
 	listErrs           []error
 	callCount          int
@@ -91,10 +102,18 @@ func (s *fakeSession) InitializeResult() *mcp.InitializeResult {
 	return s.result
 }
 
-func (s *fakeSession) ListTools(context.Context, *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+func (s *fakeSession) ListTools(_ context.Context, params *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
 	s.listCount++
+	if params == nil {
+		s.listCursors = append(s.listCursors, "")
+	} else {
+		s.listCursors = append(s.listCursors, params.Cursor)
+	}
 	if index := s.listCount - 1; index < len(s.listErrs) && s.listErrs[index] != nil {
 		return nil, s.listErrs[index]
+	}
+	if index := s.listCount - 1; index < len(s.listResults) {
+		return s.listResults[index], nil
 	}
 	return &mcp.ListToolsResult{Tools: s.tools}, nil
 }
@@ -129,13 +148,23 @@ func TestRunConnectsUpstreamDuringToolsList(t *testing.T) {
 
 	errs := make(chan error, 1)
 	go func() {
-		errs <- Run(ctx, Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")}, options)
+		errs <- Run(ctx, Config{
+			Endpoint:        new("https://service.us-east-1.api.aws/mcp"),
+			AllowEmptyTools: new(true),
+		}, options)
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
 	clientSession, err := client.Connect(ctx, clientTransport, nil)
 	if err != nil {
 		t.Fatalf("client.Connect() error = %v", err)
+	}
+	capabilities := clientSession.InitializeResult().Capabilities
+	if capabilities == nil || capabilities.Tools == nil {
+		t.Fatalf("proxy tool capabilities missing: %#v", capabilities)
+	}
+	if capabilities.Resources != nil {
+		t.Fatalf("proxy advertised unsupported upstream resource capabilities: %#v", capabilities)
 	}
 
 	if _, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{}); err != nil {
@@ -359,7 +388,7 @@ func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
 	}
 }
 
-func TestRunRegistersToolsWithoutStandaloneSSE(t *testing.T) {
+func TestRunFallsBackWhenStandaloneSSEIsUnsupported(t *testing.T) {
 	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
 	upstream.AddTool(&mcp.Tool{
 		Name:        "upstream-tool",
@@ -410,13 +439,183 @@ func TestRunRegistersToolsWithoutStandaloneSSE(t *testing.T) {
 	if findTool(tools.Tools, "upstream-tool") == nil {
 		t.Fatalf("tools = %#v, want registered upstream tool", tools.Tools)
 	}
-	if getRequests.Load() != 0 {
-		t.Fatalf("standalone SSE GET requests = %d, want 0", getRequests.Load())
+	if getRequests.Load() != 1 {
+		t.Fatalf("standalone SSE GET requests = %d, want 1", getRequests.Load())
 	}
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
 	}
 	waitForProxyRunExit(t, ctx, errs)
+}
+
+func TestRunForwardsUpstreamToolListChanges(t *testing.T) {
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
+	upstream.AddTool(&mcp.Tool{
+		Name:        "initial-tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return upstream
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true}))
+	t.Cleanup(httpServer.Close)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Config{
+			Endpoint: new(httpServer.URL),
+			SkipAuth: new(true),
+		}, RunOptions{Transport: serverTransport, Version: "test-version"})
+	}()
+
+	notifications := make(chan struct{}, 4)
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, &mcp.ClientOptions{
+		ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {
+			notifications <- struct{}{}
+		},
+	})
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	if _, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{}); err != nil {
+		t.Fatalf("initial ListTools() error = %v", err)
+	}
+	drainNotifications(notifications)
+
+	upstream.AddTool(&mcp.Tool{
+		Name:        "dynamic-tool",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(context.Context, *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		return &mcp.CallToolResult{}, nil
+	})
+
+	select {
+	case <-notifications:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for forwarded tool-list-changed notification")
+	}
+	tools, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools() after notification error = %v", err)
+	}
+	if findTool(tools.Tools, "dynamic-tool") == nil {
+		t.Fatalf("tools after notification = %#v, want dynamic tool", tools.Tools)
+	}
+
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errCh)
+}
+
+func TestRunForwardsModernElicitationRoundTrips(t *testing.T) {
+	upstreamCapabilities := make(chan *mcp.ClientCapabilities, 1)
+	upstream := mcp.NewServer(&mcp.Implementation{Name: "upstream", Version: "1.0.0"}, nil)
+	upstream.AddTool(&mcp.Tool{
+		Name:        "elicit",
+		InputSchema: map[string]any{"type": "object"},
+	}, func(_ context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		select {
+		case upstreamCapabilities <- req.ClientCapabilities():
+		default:
+		}
+		if len(req.Params.InputResponses) == 0 {
+			return &mcp.CallToolResult{
+				InputRequests: mcp.InputRequestMap{
+					"confirmation": &mcp.ElicitParams{
+						Message: "Continue?",
+						RequestedSchema: map[string]any{
+							"type": "object",
+							"properties": map[string]any{
+								"confirmed": map[string]any{"type": "boolean"},
+							},
+						},
+					},
+				},
+				RequestState: "awaiting-confirmation",
+			}, nil
+		}
+		response, ok := req.Params.InputResponses["confirmation"].(*mcp.ElicitResult)
+		if !ok {
+			return nil, fmt.Errorf("confirmation response has type %T", req.Params.InputResponses["confirmation"])
+		}
+		return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: response.Action}}}, nil
+	})
+	httpServer := httptest.NewServer(mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server {
+		return upstream
+	}, &mcp.StreamableHTTPOptions{JSONResponse: true, Stateless: true}))
+	t.Cleanup(httpServer.Close)
+
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Config{Endpoint: new(httpServer.URL), SkipAuth: new(true), Retries: new(0)}, RunOptions{
+			Transport: serverTransport,
+			Version:   "test-version",
+		})
+	}()
+
+	actions := []string{"accept", "decline"}
+	responseIndex := 0
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, &mcp.ClientOptions{
+		ElicitationHandler: func(_ context.Context, req *mcp.ElicitRequest) (*mcp.ElicitResult, error) {
+			if req.Params.Message != "Continue?" {
+				t.Errorf("elicitation message = %q, want Continue?", req.Params.Message)
+			}
+			action := actions[responseIndex]
+			responseIndex++
+			return &mcp.ElicitResult{Action: action, Content: map[string]any{"confirmed": action == "accept"}}, nil
+		},
+	})
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+
+	for _, want := range actions {
+		result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "elicit"})
+		if err != nil {
+			t.Fatalf("CallTool() for %s error = %v", want, err)
+		}
+		content, ok := result.Content[0].(*mcp.TextContent)
+		if !ok || content.Text != want {
+			t.Fatalf("CallTool() for %s content = %#v, text = %q", want, result.Content, content.Text)
+		}
+	}
+
+	select {
+	case capabilities := <-upstreamCapabilities:
+		if capabilities == nil || capabilities.Elicitation == nil {
+			t.Fatalf("upstream client did not advertise forwarded elicitation: %#v", capabilities)
+		}
+		if capabilities.RootsV2 != nil || capabilities.Roots.ListChanged {
+			t.Fatalf("upstream client advertised unsupported roots: %#v", capabilities)
+		}
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for upstream initialization capabilities")
+	}
+
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errCh)
+}
+
+func drainNotifications(notifications <-chan struct{}) {
+	for {
+		select {
+		case <-notifications:
+		default:
+			return
+		}
+	}
 }
 
 func TestRunWithSkipAuthSendsUnsignedRequestsForSessionLifecycle(t *testing.T) {
@@ -774,7 +973,7 @@ func TestDefaultConnectorRequiresEndpoint(t *testing.T) {
 
 func TestRegisterUpstreamToolsRetriesListTools(t *testing.T) {
 	upstream := &fakeSession{
-		listErrs: []error{errors.New("temporary tools/list failure")},
+		listErrs: []error{fmt.Errorf("temporary tools/list failure: %w", io.ErrUnexpectedEOF)},
 		tools:    []*mcp.Tool{{Name: "aws___search_documentation", InputSchema: map[string]any{"type": "object"}}},
 	}
 	run := proxyRun{
@@ -790,6 +989,169 @@ func TestRegisterUpstreamToolsRetriesListTools(t *testing.T) {
 	if upstream.listCount != 2 {
 		t.Fatalf("ListTools count = %d, want 2", upstream.listCount)
 	}
+}
+
+func TestRegisterUpstreamToolsDoesNotRetryApplicationErrors(t *testing.T) {
+	upstream := &fakeSession{
+		listErrs: []error{errors.New("invalid tools/list request")},
+	}
+	run := proxyRun{
+		config: Config{Retries: new(3)},
+		server: mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "test"}, nil),
+	}
+
+	err := run.registerUpstreamTools(t.Context(), upstream)
+	if err == nil || err.Error() != "invalid tools/list request" {
+		t.Fatalf("registerUpstreamTools() error = %v, want application error", err)
+	}
+	if upstream.listCount != 1 {
+		t.Fatalf("ListTools count = %d, want 1", upstream.listCount)
+	}
+}
+
+func TestRegisterUpstreamToolsRetriesEmptyInitialList(t *testing.T) {
+	upstream := &fakeSession{
+		listResults: []*mcp.ListToolsResult{
+			{Tools: []*mcp.Tool{}},
+			{Tools: []*mcp.Tool{{Name: "recovered", InputSchema: map[string]any{"type": "object"}}}},
+		},
+	}
+	run := proxyRun{
+		config: Config{Retries: new(1)},
+		server: mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "test"}, nil),
+	}
+
+	if err := run.registerUpstreamTools(t.Context(), upstream); err != nil {
+		t.Fatalf("registerUpstreamTools() error = %v", err)
+	}
+	if upstream.listCount != 2 {
+		t.Fatalf("ListTools count = %d, want 2", upstream.listCount)
+	}
+	if !run.tools.contains("recovered") {
+		t.Fatalf("registered tools = %#v, want recovered", run.tools.registered)
+	}
+}
+
+func TestRegisterUpstreamToolsRejectsPersistentlyEmptyInitialList(t *testing.T) {
+	upstream := &fakeSession{}
+	run := proxyRun{
+		config: Config{Retries: new(1)},
+		server: mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "test"}, nil),
+	}
+
+	err := run.registerUpstreamTools(t.Context(), upstream)
+	proxyErr, ok := errors.AsType[*proxyError](err)
+	if !ok {
+		t.Fatalf("registerUpstreamTools() error = %T %v, want *proxyError", err, err)
+	}
+	if proxyErr.category != categoryRetryable || proxyErr.reason != reasonUpstreamEmptyTools {
+		t.Fatalf("registerUpstreamTools() error = %#v", proxyErr)
+	}
+	if upstream.listCount != 2 {
+		t.Fatalf("ListTools count = %d, want 2", upstream.listCount)
+	}
+}
+
+func TestRegisterUpstreamToolsAllowsExplicitlyEmptyInitialList(t *testing.T) {
+	upstream := &fakeSession{}
+	run := proxyRun{
+		config: Config{AllowEmptyTools: new(true), Retries: new(3)},
+		server: mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "test"}, nil),
+	}
+
+	if err := run.registerUpstreamTools(t.Context(), upstream); err != nil {
+		t.Fatalf("registerUpstreamTools() error = %v", err)
+	}
+	if upstream.listCount != 1 {
+		t.Fatalf("ListTools count = %d, want 1", upstream.listCount)
+	}
+}
+
+func TestRegisterUpstreamToolsExhaustsPagination(t *testing.T) {
+	upstream := &fakeSession{
+		listResults: []*mcp.ListToolsResult{
+			{
+				Tools:      []*mcp.Tool{{Name: "first", InputSchema: map[string]any{"type": "object"}}},
+				NextCursor: "second-page",
+			},
+			{Tools: []*mcp.Tool{{Name: "second", InputSchema: map[string]any{"type": "object"}}}},
+		},
+	}
+	run := proxyRun{
+		server: mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "test"}, nil),
+	}
+
+	if err := run.registerUpstreamTools(t.Context(), upstream); err != nil {
+		t.Fatalf("registerUpstreamTools() error = %v", err)
+	}
+	if got := strings.Join(upstream.listCursors, ","); got != ",second-page" {
+		t.Fatalf("ListTools cursors = %q, want %q", got, ",second-page")
+	}
+	if !run.tools.contains("first") || !run.tools.contains("second") {
+		t.Fatalf("registered tools = %#v, want both pages", run.tools.registered)
+	}
+}
+
+func TestRunReconcilesDynamicUpstreamTools(t *testing.T) {
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	first := &mcp.Tool{Name: "first", Description: "first version", InputSchema: map[string]any{"type": "object"}}
+	second := &mcp.Tool{Name: "second", InputSchema: map[string]any{"type": "object"}}
+	session := &fakeSession{
+		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
+		tools:  []*mcp.Tool{second},
+		listResults: []*mcp.ListToolsResult{
+			{Tools: []*mcp.Tool{first}},
+			{Tools: []*mcp.Tool{first}},
+			{Tools: []*mcp.Tool{second}},
+		},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")}, RunOptions{
+			Connector: &fakeConnector{sess: session},
+			Transport: serverTransport,
+			Version:   "test-version",
+		})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+
+	tools, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("first ListTools() error = %v", err)
+	}
+	if findTool(tools.Tools, "first") == nil || findTool(tools.Tools, "second") != nil {
+		t.Fatalf("first tools = %#v", tools.Tools)
+	}
+
+	tools, err = clientSession.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("second ListTools() error = %v", err)
+	}
+	if findTool(tools.Tools, "first") != nil || findTool(tools.Tools, "second") == nil {
+		t.Fatalf("second tools = %#v", tools.Tools)
+	}
+	if findTool(tools.Tools, proxyStatusToolName) == nil {
+		t.Fatalf("proxy status tool missing from tools = %#v", tools.Tools)
+	}
+
+	if _, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "first"}); err == nil {
+		t.Fatal("removed tool call error = nil")
+	}
+	if _, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "second"}); err != nil {
+		t.Fatalf("added tool CallTool() error = %v", err)
+	}
+
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errCh)
 }
 
 func TestProfileOverrideInvalidatesFailedSession(t *testing.T) {
@@ -817,6 +1179,65 @@ func TestProfileOverrideInvalidatesFailedSession(t *testing.T) {
 	if _, ok := run.profiles.cache["dev"]; ok {
 		t.Fatal("failed profile session remained cached")
 	}
+}
+
+func TestRunReconnectsAndRebindsAfterTerminalDefaultSessionFailure(t *testing.T) {
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	tool := &mcp.Tool{Name: "recoverable", InputSchema: map[string]any{"type": "object"}}
+	first := &fakeSession{
+		result:  &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}},
+		tools:   []*mcp.Tool{tool},
+		callErr: fmt.Errorf("lost upstream session: %w", mcp.ErrConnectionClosed),
+	}
+	second := &fakeSession{
+		result:     first.result,
+		tools:      []*mcp.Tool{tool},
+		callResult: &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "reconnected"}}},
+	}
+	connector := &fakeConnector{sessions: []*fakeSession{first, second}}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")}, RunOptions{
+			Connector: connector,
+			Transport: serverTransport,
+			Version:   "test-version",
+		})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	failedResult, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "recoverable"})
+	if err != nil {
+		t.Fatalf("first CallTool() protocol error = %v", err)
+	}
+	if !failedResult.IsError {
+		t.Fatalf("first CallTool() result = %#v, want tool error", failedResult)
+	}
+	if !first.closed || first.callCount != 1 {
+		t.Fatalf("first session closed = %v, call count = %d", first.closed, first.callCount)
+	}
+
+	result, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "recoverable"})
+	if err != nil {
+		t.Fatalf("second CallTool() error = %v", err)
+	}
+	content, ok := result.Content[0].(*mcp.TextContent)
+	if !ok || content.Text != "reconnected" {
+		t.Fatalf("second CallTool() content = %#v", result.Content)
+	}
+	if second.callCount != 1 || len(connector.configs) != 2 {
+		t.Fatalf("second call count = %d, connects = %d", second.callCount, len(connector.configs))
+	}
+
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errCh)
 }
 
 func TestRunRegistersAndForwardsUpstreamTools(t *testing.T) {
@@ -1088,12 +1509,9 @@ func TestRunRoutesDefaultAWSProfileThroughDefaultSession(t *testing.T) {
 	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestCallSessionToolRetriesTransientErrors(t *testing.T) {
+func TestCallSessionToolDoesNotReplayFailedCalls(t *testing.T) {
 	session := &fakeSession{
 		callErrs: []error{errors.New("temporary failure")},
-		callResult: &mcp.CallToolResult{
-			Content: []mcp.Content{&mcp.TextContent{Text: "retried"}},
-		},
 	}
 	run := proxyRun{
 		config: Config{
@@ -1101,16 +1519,12 @@ func TestCallSessionToolRetriesTransientErrors(t *testing.T) {
 		},
 	}
 
-	result, err := run.callSessionTool(t.Context(), session, &mcp.CallToolParams{Name: "aws___call_aws"})
-	if err != nil {
-		t.Fatalf("callSessionTool() error = %v", err)
+	_, err := run.callSessionTool(t.Context(), session, &mcp.CallToolParams{Name: "aws___call_aws"})
+	if err == nil || err.Error() != "temporary failure" {
+		t.Fatalf("callSessionTool() error = %v, want temporary failure", err)
 	}
-	if session.callCount != 2 {
-		t.Fatalf("CallTool count = %d, want 2", session.callCount)
-	}
-	text, ok := result.Content[0].(*mcp.TextContent)
-	if !ok || text.Text != "retried" {
-		t.Fatalf("result content = %#v", result.Content)
+	if session.callCount != 1 {
+		t.Fatalf("CallTool count = %d, want 1", session.callCount)
 	}
 }
 
@@ -1120,6 +1534,130 @@ func TestRetryCountDefaultsToThreeAndAllowsDisable(t *testing.T) {
 	}
 	if got := retryCount(new(0)); got != 0 {
 		t.Fatalf("retryCount(0) = %d, want 0", got)
+	}
+	if got := transportRetryCount(nil); got != 3 {
+		t.Fatalf("transportRetryCount(nil) = %d, want 3", got)
+	}
+	if got := transportRetryCount(new(0)); got != -1 {
+		t.Fatalf("transportRetryCount(0) = %d, want -1", got)
+	}
+}
+
+func TestRetryableErrorUsesStructuredTransientConditions(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "connection_closed", err: fmt.Errorf("wrapped: %w", mcp.ErrConnectionClosed), want: true},
+		{name: "session_missing", err: mcp.ErrSessionMissing, want: true},
+		{name: "unexpected_eof", err: io.ErrUnexpectedEOF, want: true},
+		{name: "timeout", err: context.DeadlineExceeded, want: true},
+		{name: "request_timeout", err: &upstreamHTTPError{statusCode: http.StatusRequestTimeout}, want: true},
+		{name: "too_many_requests", err: &upstreamHTTPError{statusCode: http.StatusTooManyRequests}, want: true},
+		{name: "internal_server_error", err: &upstreamHTTPError{statusCode: http.StatusInternalServerError}, want: true},
+		{name: "bad_gateway", err: &upstreamHTTPError{statusCode: http.StatusBadGateway}, want: true},
+		{name: "service_unavailable", err: &upstreamHTTPError{statusCode: http.StatusServiceUnavailable}, want: true},
+		{name: "gateway_timeout", err: &upstreamHTTPError{statusCode: http.StatusGatewayTimeout}, want: true},
+		{name: "jsonrpc_internal_error", err: &upstreamHTTPError{statusCode: http.StatusInternalServerError, jsonrpcMessage: "application failure"}},
+		{name: "unauthorized", err: &upstreamHTTPError{statusCode: http.StatusUnauthorized}},
+		{name: "forbidden", err: &upstreamHTTPError{statusCode: http.StatusForbidden}},
+		{name: "ordinary_bad_request", err: &upstreamHTTPError{statusCode: http.StatusBadRequest}},
+		{name: "application_error", err: errors.New("invalid request")},
+		{name: "nil"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := retryableError(test.err); got != test.want {
+				t.Fatalf("retryableError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
+func TestShouldRetryHonorsBudgetAndContext(t *testing.T) {
+	transient := &upstreamHTTPError{statusCode: http.StatusServiceUnavailable}
+	if !shouldRetry(t.Context(), 0, 1, transient) {
+		t.Fatal("shouldRetry() = false for first transient retry")
+	}
+	if shouldRetry(t.Context(), 1, 1, transient) {
+		t.Fatal("shouldRetry() = true after retry budget exhausted")
+	}
+	if shouldRetry(t.Context(), 0, 1, errors.New("application failure")) {
+		t.Fatal("shouldRetry() = true for an application failure")
+	}
+	canceled, cancel := context.WithCancel(t.Context())
+	cancel()
+	if shouldRetry(canceled, 0, 1, transient) {
+		t.Fatal("shouldRetry() = true after context cancellation")
+	}
+}
+
+func TestRetryDelayWithJitterIsBoundedAndHonorsRetryAfter(t *testing.T) {
+	minimumJitter := func(int64) int64 { return 0 }
+	maximumJitter := func(n int64) int64 { return n - 1 }
+
+	if got := retryDelayWithJitter(0, 0, minimumJitter); got != 50*time.Millisecond {
+		t.Fatalf("minimum first delay = %s, want 50ms", got)
+	}
+	if got := retryDelayWithJitter(0, 0, maximumJitter); got != 100*time.Millisecond {
+		t.Fatalf("maximum first delay = %s, want 100ms", got)
+	}
+	if got := retryDelayWithJitter(1, 0, minimumJitter); got != 100*time.Millisecond {
+		t.Fatalf("minimum second delay = %s, want 100ms", got)
+	}
+	if got := retryDelayWithJitter(100, 0, minimumJitter); got != time.Second {
+		t.Fatalf("capped backoff with minimum jitter = %s, want 1s", got)
+	}
+	if got := retryDelayWithJitter(0, 3*time.Second, minimumJitter); got != 3*time.Second {
+		t.Fatalf("Retry-After delay = %s, want 3s", got)
+	}
+	if got := retryDelayWithJitter(0, time.Minute, minimumJitter); got != maxRetryDelay {
+		t.Fatalf("bounded Retry-After delay = %s, want %s", got, maxRetryDelay)
+	}
+}
+
+func TestRetryAfterExtractsWrappedHTTPError(t *testing.T) {
+	err := fmt.Errorf("request failed: %w", &upstreamHTTPError{retryAfter: 7 * time.Second})
+	if got := retryAfter(err); got != 7*time.Second {
+		t.Fatalf("retryAfter() = %s, want 7s", got)
+	}
+}
+
+func TestWaitForRetryReturnsImmediatelyAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	started := time.Now()
+	err := waitForRetry(ctx, time.Hour)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("waitForRetry() error = %v, want context.Canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("waitForRetry() took %s after cancellation", elapsed)
+	}
+}
+
+func TestInvalidatesSessionOnlyForTerminalSessionAndAuthenticationErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "connection_closed", err: fmt.Errorf("wrapped: %w", mcp.ErrConnectionClosed), want: true},
+		{name: "session_missing", err: mcp.ErrSessionMissing, want: true},
+		{name: "unauthorized", err: &upstreamHTTPError{statusCode: http.StatusUnauthorized}, want: true},
+		{name: "forbidden", err: &upstreamHTTPError{statusCode: http.StatusForbidden}, want: true},
+		{name: "service_unavailable", err: &upstreamHTTPError{statusCode: http.StatusServiceUnavailable}},
+		{name: "timeout", err: context.DeadlineExceeded},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := invalidatesSession(test.err); got != test.want {
+				t.Fatalf("invalidatesSession() = %v, want %v", got, test.want)
+			}
+		})
 	}
 }
 
@@ -1392,6 +1930,18 @@ func TestRunFiltersReadOnlyTools(t *testing.T) {
 	if findTool(tools.Tools, proxyStatusToolName) == nil {
 		t.Fatalf("proxy status tool missing from tools = %#v", tools.Tools)
 	}
+	if _, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "write"}); err == nil {
+		t.Fatal("filtered write tool CallTool() error = nil")
+	}
+	if session.callCount != 0 {
+		t.Fatalf("upstream call count after filtered call = %d, want 0", session.callCount)
+	}
+	if _, err := clientSession.CallTool(ctx, &mcp.CallToolParams{Name: "read"}); err != nil {
+		t.Fatalf("read tool CallTool() error = %v", err)
+	}
+	if session.callName != "read" {
+		t.Fatalf("upstream call name = %q, want read", session.callName)
+	}
 
 	if err := clientSession.Close(); err != nil {
 		t.Fatalf("clientSession.Close() error = %v", err)
@@ -1532,17 +2082,6 @@ func TestRunReturnsUpstreamConnectErrorDuringToolsList(t *testing.T) {
 	case <-errs:
 	case <-time.After(5 * time.Second):
 		t.Fatal("proxy did not exit after context cancellation")
-	}
-}
-
-func TestApplyUpstreamCapabilitiesKeepsLocalWhenUpstreamCapabilitiesMissing(t *testing.T) {
-	localCaps := &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{ListChanged: true}}
-	local := &mcp.InitializeResult{Capabilities: localCaps}
-
-	applyUpstreamCapabilities(local, &mcp.InitializeResult{})
-
-	if local.Capabilities != localCaps {
-		t.Fatal("local capabilities changed")
 	}
 }
 

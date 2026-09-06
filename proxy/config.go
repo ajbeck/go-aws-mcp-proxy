@@ -14,9 +14,10 @@ type Config struct {
 	CaBundle *string
 	Metadata *map[string]string
 
-	ReadOnly *bool
-	LogLevel *string
-	Retries  *int
+	AllowEmptyTools *bool
+	ReadOnly        *bool
+	LogLevel        *string
+	Retries         *int
 
 	Timeout        *time.Duration
 	ConnectTimeout *time.Duration
