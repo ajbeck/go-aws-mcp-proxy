@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -386,16 +385,7 @@ func TestFreshCredentialsProviderResolvesAssumeRoleChains(t *testing.T) {
 
 			sharedConfig := fmt.Sprintf("[profile assumed]\nrole_arn = arn:aws:iam::123456789012:role/test\nsource_profile = %s\nregion = us-east-1\n", test.sourceProfile)
 			if test.process {
-				executable, err := os.Executable()
-				if err != nil {
-					t.Fatalf("os.Executable() error = %v", err)
-				}
-				command := fmt.Sprintf(`"%s" -test.run=^TestCredentialProcessSourceHelper$`, strings.ReplaceAll(executable, `"`, `\"`))
-				if runtime.GOOS == "windows" {
-					// cmd.exe /C consumes an outer quote before parsing the quoted executable.
-					command = fmt.Sprintf(`""%s" -test.run=^TestCredentialProcessSourceHelper$"`, strings.ReplaceAll(executable, `"`, `\"`))
-				}
-				sharedConfig += fmt.Sprintf("\n[profile %s]\ncredential_process = %s\n", test.sourceProfile, command)
+				sharedConfig += fmt.Sprintf("\n[profile %s]\ncredential_process = go run ../testdata/credential-process\n", test.sourceProfile)
 			}
 
 			configPath := filepath.Join(t.TempDir(), "config")
@@ -414,7 +404,7 @@ func TestFreshCredentialsProviderResolvesAssumeRoleChains(t *testing.T) {
 			t.Setenv("AWS_ACCESS_KEY_ID", "")
 			t.Setenv("AWS_SECRET_ACCESS_KEY", "")
 			t.Setenv("AWS_SESSION_TOKEN", "")
-			t.Setenv("AWS_CREDENTIAL_PROCESS_SOURCE_HELPER", "1")
+			t.Setenv("AWS_MCP_PROXY_CREDENTIAL_ACCESS_KEY", "PROCESSKEY")
 
 			provider := freshCredentialsProvider{cfg: Config{
 				Profiles: new([]string{"assumed"}),
@@ -432,14 +422,6 @@ func TestFreshCredentialsProviderResolvesAssumeRoleChains(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestCredentialProcessSourceHelper(t *testing.T) {
-	if os.Getenv("AWS_CREDENTIAL_PROCESS_SOURCE_HELPER") != "1" {
-		return
-	}
-	fmt.Fprint(os.Stdout, `{"Version":1,"AccessKeyId":"PROCESSKEY","SecretAccessKey":"process-secret","SessionToken":"process-token"}`)
-	os.Exit(0)
 }
 
 func TestNewHTTPClientTrustsCABundle(t *testing.T) {
