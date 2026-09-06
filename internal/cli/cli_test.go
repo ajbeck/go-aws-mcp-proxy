@@ -132,7 +132,8 @@ func TestCredentialProcessStdinIsolation(t *testing.T) {
 	t.Setenv("AWS_MCP_PROXY_TEST_BINARY", executable)
 	command := `"$AWS_MCP_PROXY_TEST_BINARY" -test.run=^TestCredentialProcessStdinIsolation$`
 	if runtime.GOOS == "windows" {
-		command = `"%AWS_MCP_PROXY_TEST_BINARY%" -test.run=^TestCredentialProcessStdinIsolation$`
+		// cmd.exe /C consumes an outer quote before parsing the quoted executable.
+		command = `""%AWS_MCP_PROXY_TEST_BINARY%" -test.run=^TestCredentialProcessStdinIsolation$"`
 	}
 	provider := processcreds.NewProvider(command)
 	credentials, err := provider.Retrieve(t.Context())
