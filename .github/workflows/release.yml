@@ -1,14 +1,13 @@
 name: Release
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
-      version:
-        description: "Semantic version to release, without the leading v. Example: 1.2.3"
-        required: true
-        type: string
-      commit:
-        description: "Optional commit SHA to tag and release. Defaults to the current HEAD of main."
+      release_tag:
+        description: "Existing release tag whose assets should be rebuilt and uploaded"
         required: false
         type: string
 
@@ -16,86 +15,20 @@ permissions:
   contents: read
 
 concurrency:
-  group: release
+  group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  validate-and-tag:
-    name: Validate Inputs And Create Tag
+  verify:
+    name: Verify Release Commit
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    permissions:
-      contents: write
-    outputs:
-      commit: ${{ steps.validate.outputs.commit }}
-      tag: ${{ steps.validate.outputs.tag }}
-      version: ${{ steps.validate.outputs.version }}
     steps:
       - name: Checkout
         # https://github.com/actions/checkout
         uses: actions/checkout@v7
         with:
-          fetch-depth: 0
-
-      - name: Validate release inputs
-        id: validate
-        shell: bash
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_COMMIT: ${{ inputs.commit }}
-        run: |
-          set -euo pipefail
-
-          version="${INPUT_VERSION#v}"
-          tag="v${version}"
-
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::version must be M.m.p, for example 1.2.3"
-            exit 1
-          fi
-
-          git fetch --force origin main:refs/remotes/origin/main
-          git fetch --force --tags origin
-
-          if [[ -n "${INPUT_COMMIT}" ]]; then
-            commit="$(git rev-parse "${INPUT_COMMIT}^{commit}")"
-          else
-            commit="$(git rev-parse refs/remotes/origin/main^{commit})"
-          fi
-          if ! git merge-base --is-ancestor "${commit}" refs/remotes/origin/main; then
-            echo "::error::commit ${commit} is not reachable from main"
-            exit 1
-          fi
-
-          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
-            echo "::error::tag ${tag} already exists"
-            exit 1
-          fi
-
-          latest_tag="$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n 1 || true)"
-          if [[ -n "${latest_tag}" ]]; then
-            newest="$(printf '%s\n%s\n' "${latest_tag}" "${tag}" | sort -V | tail -n 1)"
-            if [[ "${newest}" != "${tag}" || "${latest_tag}" == "${tag}" ]]; then
-              echo "::error::${tag} must be newer than latest release tag ${latest_tag}"
-              exit 1
-            fi
-
-            latest_commit="$(git rev-list -n 1 "${latest_tag}")"
-            if ! git merge-base --is-ancestor "${latest_commit}" "${commit}"; then
-              echo "::error::commit ${commit} must be after ${latest_tag} (${latest_commit})"
-              exit 1
-            fi
-          fi
-
-          echo "version=${version}" >> "${GITHUB_OUTPUT}"
-          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
-          echo "commit=${commit}" >> "${GITHUB_OUTPUT}"
-
-      - name: Run CI at release commit
-        # https://github.com/actions/checkout
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ steps.validate.outputs.commit }}
+          ref: ${{ inputs.release_tag || github.sha }}
 
       - name: Set up Go
         # https://github.com/actions/setup-go
@@ -104,23 +37,69 @@ jobs:
           go-version-file: go.mod
 
       - name: Run CI
-        run: go run ./cmd/scripts/main.go ci
+        run: go run ./cmd/scripts ci
 
-      - name: Create and push tag
-        shell: bash
+  release:
+    name: Prepare Release
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    outputs:
+      tag: ${{ steps.release-context.outputs.tag }}
+      version: ${{ steps.release-context.outputs.version }}
+    steps:
+      - name: Create release automation token
+        id: release-token
+        if: ${{ vars.RELEASE_PLEASE_CLIENT_ID != '' }}
+        # https://github.com/actions/create-github-app-token/releases/tag/v3.2.0
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
+        with:
+          client-id: ${{ vars.RELEASE_PLEASE_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+
+      - name: Create or update release pull request or GitHub release
+        id: release
+        if: ${{ github.event_name != 'workflow_dispatch' || inputs.release_tag == '' }}
+        # https://github.com/googleapis/release-please-action/releases/tag/v5.0.0
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7
+        with:
+          token: ${{ steps.release-token.outputs.token || github.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+          target-branch: main
+
+      - name: Configure release asset packaging
+        id: release-context
+        if: ${{ steps.release.outputs.release_created == 'true' || inputs.release_tag != '' }}
         env:
-          TAG: ${{ steps.validate.outputs.tag }}
-          COMMIT: ${{ steps.validate.outputs.commit }}
+          AUTOMATED_RELEASE_TAG: ${{ steps.release.outputs.tag_name }}
+          AUTOMATED_RELEASE_VERSION: ${{ steps.release.outputs.version }}
+          GH_TOKEN: ${{ steps.release-token.outputs.token || github.token }}
+          MANUAL_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" "${COMMIT}" -m "Release ${TAG}"
-          git push origin "refs/tags/${TAG}"
+
+          release_tag="${MANUAL_RELEASE_TAG:-$AUTOMATED_RELEASE_TAG}"
+          release_version="${AUTOMATED_RELEASE_VERSION:-${release_tag#v}}"
+
+          gh release view "$release_tag" --json tagName > /dev/null
+
+          {
+            echo "tag=$release_tag"
+            echo "version=$release_version"
+          } >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.goos }}-${{ matrix.goarch }}
-    needs: validate-and-tag
+    needs: release
+    if: ${{ needs.release.outputs.tag != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -147,11 +126,11 @@ jobs:
             goarch: amd64
             archive: zip
     steps:
-      - name: Checkout release commit
+      - name: Checkout release tag
         # https://github.com/actions/checkout
         uses: actions/checkout@v7
         with:
-          ref: ${{ needs.validate-and-tag.outputs.commit }}
+          ref: ${{ needs.release.outputs.tag }}
 
       - name: Set up Go
         # https://github.com/actions/setup-go
@@ -163,7 +142,7 @@ jobs:
         id: build
         shell: bash
         env:
-          VERSION: ${{ needs.validate-and-tag.outputs.version }}
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
           set -euo pipefail
 
@@ -227,10 +206,11 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Create GitHub Release
+    name: Upload Release Assets
     needs:
-      - validate-and-tag
+      - release
       - build
+    if: ${{ needs.release.outputs.tag != '' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -243,23 +223,8 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Create release and upload assets
-        shell: bash
+      - name: Upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          TAG: ${{ needs.validate-and-tag.outputs.tag }}
-          COMMIT: ${{ needs.validate-and-tag.outputs.commit }}
-        run: |
-          set -euo pipefail
-          if gh release view "${TAG}" --repo "${REPO}" >/dev/null 2>&1; then
-            echo "::error::release ${TAG} already exists"
-            exit 1
-          fi
-
-          gh release create "${TAG}" dist/* \
-            --repo "${REPO}" \
-            --target "${COMMIT}" \
-            --title "${TAG}" \
-            --generate-notes \
-            --verify-tag
+          TAG: ${{ needs.release.outputs.tag }}
+        run: gh release upload "$TAG" dist/* --clobber
