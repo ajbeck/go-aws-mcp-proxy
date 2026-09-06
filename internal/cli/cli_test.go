@@ -32,8 +32,10 @@ func TestAppRunBuildsProxyConfigAndLogger(t *testing.T) {
 	var stderr bytes.Buffer
 
 	application := &app{
-		Endpoint: new("https://bedrock-agentcore.us-east-1.amazonaws.com/mcp"),
-		LogLevel: new("DEBUG"),
+		proxyArguments: proxyArguments{
+			Endpoint: new("https://bedrock-agentcore.us-east-1.amazonaws.com/mcp"),
+			LogLevel: new("DEBUG"),
+		},
 	}
 
 	err := application.Run(t.Context(), lookupEnv(nil), run.call, &stderr)
@@ -289,7 +291,7 @@ func TestNewLoggerHonorsLogLevel(t *testing.T) {
 }
 
 func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
-	cfg := app{
+	cfg := proxyArguments{
 		Endpoint: new("https://service.example.com/mcp"),
 		Profiles: []string{
 			"default",
@@ -358,7 +360,7 @@ func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
 }
 
 func TestAppConfigPreservesExplicitMetadata(t *testing.T) {
-	cfg := app{
+	cfg := proxyArguments{
 		Endpoint: new("https://service.us-east-1.api.aws/mcp"),
 		Metadata: map[string]string{
 			"AWS_REGION": "us-west-2",
@@ -374,7 +376,7 @@ func TestAppConfigPreservesExplicitMetadata(t *testing.T) {
 }
 
 func TestAppConfigDedupesProfiles(t *testing.T) {
-	cfg := app{
+	cfg := proxyArguments{
 		Endpoint: new("https://service.us-east-1.api.aws/mcp"),
 		Profiles: []string{
 			"default",
@@ -430,7 +432,7 @@ func TestAppConfigUsesDocumentedProfilePrecedence(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			cfg := app{
+			cfg := proxyArguments{
 				Endpoint: new("https://service.us-east-1.api.aws/mcp"),
 				Profiles: test.cli,
 			}.config(lookupEnv(test.env))
@@ -448,7 +450,7 @@ func TestAppConfigUsesDocumentedProfilePrecedence(t *testing.T) {
 }
 
 func TestAppConfigLeavesOmittedOptionalValuesUnset(t *testing.T) {
-	cfg := app{
+	cfg := proxyArguments{
 		Endpoint: new("https://service.us-east-1.api.aws/mcp"),
 	}.config(lookupEnv(nil))
 
