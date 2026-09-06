@@ -124,6 +124,7 @@ func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
 			"team":       "platform",
 			"AWS_REGION": "us-west-2",
 		},
+		AllowEmptyTools:  new(true),
 		ReadOnly:         new(true),
 		LogLevel:         new("DEBUG"),
 		Retries:          new(3),
@@ -160,6 +161,9 @@ func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
 	}
 	if cfg.ReadOnly == nil || !*cfg.ReadOnly || cfg.LogLevel == nil || *cfg.LogLevel != "DEBUG" || cfg.Retries == nil || *cfg.Retries != 3 {
 		t.Fatalf("unexpected config: %+v", cfg)
+	}
+	if cfg.AllowEmptyTools == nil || !*cfg.AllowEmptyTools {
+		t.Fatalf("AllowEmptyTools = %#v, want true", cfg.AllowEmptyTools)
 	}
 	if cfg.Timeout == nil || *cfg.Timeout != 10500*time.Millisecond {
 		t.Fatalf("Timeout = %#v", cfg.Timeout)
@@ -222,7 +226,7 @@ func TestAppConfigLeavesOmittedOptionalValuesUnset(t *testing.T) {
 	if cfg.Profiles != nil {
 		t.Fatalf("Profiles = %#v, want nil", cfg.Profiles)
 	}
-	if cfg.ReadOnly != nil || cfg.Retries != nil || cfg.Timeout != nil {
+	if cfg.AllowEmptyTools != nil || cfg.ReadOnly != nil || cfg.Retries != nil || cfg.Timeout != nil {
 		t.Fatalf("optional defaults were unexpectedly set: %+v", cfg)
 	}
 }

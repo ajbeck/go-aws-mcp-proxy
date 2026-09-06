@@ -45,10 +45,11 @@ type app struct {
 
 	Metadata map[string]string `help:"Metadata to inject into MCP requests as key=value pairs." mapsep:"none" placeholder:"KEY=VALUE"`
 
-	ReadOnly *bool `name:"read-only" help:"Disable tools that do not advertise readOnlyHint=true."`
+	AllowEmptyTools *bool `name:"allow-empty-tools" help:"Allow an upstream endpoint to initialize with no tools."`
+	ReadOnly        *bool `name:"read-only" help:"Disable tools that do not advertise readOnlyHint=true."`
 
 	LogLevel *string `name:"log-level" enum:"DEBUG,INFO,WARNING,ERROR,CRITICAL" help:"Set the logging level."`
-	Retries  *int    `help:"Number of retries when calling endpoint MCP. Defaults to 3; 0 disables retries."`
+	Retries  *int    `help:"Number of retries for connection, discovery, and stream recovery. Defaults to 3; 0 disables retries."`
 
 	Timeout        *float64 `help:"Total timeout in seconds when connecting to endpoint."`
 	ConnectTimeout *float64 `name:"connect-timeout" help:"Connection timeout in seconds."`
@@ -171,6 +172,7 @@ func (a app) config(lookupEnv LookupEnv) proxy.Config {
 		Service:          service,
 		Region:           region,
 		CaBundle:         a.CaBundle,
+		AllowEmptyTools:  a.AllowEmptyTools,
 		ReadOnly:         a.ReadOnly,
 		LogLevel:         a.LogLevel,
 		Retries:          a.Retries,
