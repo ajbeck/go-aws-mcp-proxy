@@ -977,6 +977,7 @@ func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
 
 type mcpUpstreamConnector struct {
 	Credentials            credentialsProvider
+	DisableStandaloneSSE   bool
 	ElicitationHandler     func(context.Context, *mcp.ElicitParams) (*mcp.ElicitResult, error)
 	HTTPClient             *http.Client
 	Logger                 *slog.Logger
@@ -1068,9 +1069,10 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 	retries := retryCount(cfg.Retries)
 	for attempt := 0; ; attempt++ {
 		session, err := client.Connect(ctx, &mcp.StreamableClientTransport{
-			Endpoint:   endpoint,
-			HTTPClient: httpClient,
-			MaxRetries: transportRetryCount(cfg.Retries),
+			DisableStandaloneSSE: c.DisableStandaloneSSE,
+			Endpoint:             endpoint,
+			HTTPClient:           httpClient,
+			MaxRetries:           transportRetryCount(cfg.Retries),
 		}, nil)
 		if err == nil {
 			return session, nil
