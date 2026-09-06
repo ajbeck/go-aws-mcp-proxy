@@ -13,7 +13,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release
@@ -24,6 +24,8 @@ jobs:
     name: Validate Inputs And Create Tag
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     outputs:
       commit: ${{ steps.validate.outputs.commit }}
       tag: ${{ steps.validate.outputs.tag }}
@@ -121,6 +123,10 @@ jobs:
     needs: validate-and-tag
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      attestations: write
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -184,6 +190,30 @@ jobs:
 
           (cd bin && sha256sum "${asset}" > "${asset}.sha256")
           echo "asset=${asset}" >> "${GITHUB_OUTPUT}"
+          echo "contents=bin/${asset_base}" >> "${GITHUB_OUTPUT}"
+
+      - name: Generate SPDX SBOM
+        # https://github.com/anchore/sbom-action/releases/tag/v0.24.2
+        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
+        with:
+          path: ${{ steps.build.outputs.contents }}
+          format: spdx-json
+          output-file: bin/${{ steps.build.outputs.asset }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Attest build provenance
+        # https://github.com/actions/attest/releases/tag/v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: bin/${{ steps.build.outputs.asset }}
+
+      - name: Attest SPDX SBOM
+        # https://github.com/actions/attest/releases/tag/v4.2.2
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-path: bin/${{ steps.build.outputs.asset }}
+          sbom-path: bin/${{ steps.build.outputs.asset }}.spdx.json
 
       - name: Upload packaged binary
         # https://github.com/actions/upload-artifact
@@ -193,6 +223,7 @@ jobs:
           path: |
             bin/${{ steps.build.outputs.asset }}
             bin/${{ steps.build.outputs.asset }}.sha256
+            bin/${{ steps.build.outputs.asset }}.spdx.json
           if-no-files-found: error
 
   publish:
@@ -202,6 +233,8 @@ jobs:
       - build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: write
     steps:
       - name: Download release assets
         # https://github.com/actions/download-artifact
