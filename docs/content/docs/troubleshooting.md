@@ -28,7 +28,11 @@ The bundle is trusted _in addition to_ the system roots, so first-party AWS endp
 
 ## Credentials: unable to sign the request
 
-Signed endpoints need AWS credentials from the standard chain — environment variables, shared config, a named profile, or SSO. If none are found, the request can't be signed. Supply a profile:
+Signed endpoints need AWS credentials from the standard chain — environment variables, shared config, a named profile, or SSO. If none are found, the request can't be signed.
+
+Run doctor first to see the SDK credential source and the effective STS identity:
+
+{{< command >}}aws-mcp-proxy doctor https://<endpoint>.api.aws/mcp --profile my-profile{{< /command >}}
 
 {{< command >}}aws-mcp-proxy https://<endpoint>.api.aws/mcp --profile my-profile{{< /command >}}
 
@@ -62,5 +66,9 @@ The SigV4 service and region are inferred from the endpoint host, including `*.a
 When the cause isn't obvious, raise the log level to surface credential resolution, TLS setup, and upstream request detail on stderr:
 
 {{< command >}}aws-mcp-proxy https://<endpoint>.api.aws/mcp --log-level DEBUG{{< /command >}}
+
+Doctor suppresses recovered transport negotiation by default. Pass
+`--log-level DEBUG` explicitly when you need its underlying STS or MCP transport
+logs.
 
 {{< note >}}For flag semantics and signing behavior beyond what's covered here, the upstream [aws/mcp-proxy-for-aws](https://github.com/aws/mcp-proxy-for-aws) remains canonical.{{< /note >}}

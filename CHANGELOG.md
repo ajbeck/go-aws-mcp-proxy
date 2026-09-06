@@ -13,6 +13,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Cross-account profile routing for authenticated tools on EKS and other SigV4 MCP endpoints.
 - Build-provenance and SPDX SBOM attestations for release archives, plus SPDX JSON release assets.
 - Runnable Go embedding example for the supported `proxy.Run` API.
+- Non-mutating `aws-mcp-proxy doctor` diagnostics for configuration, AWS credential source and expiration, effective STS identity, and optional MCP connectivity.
+- Stable JSON doctor reports and exit codes for configuration, credential, network/TLS, and upstream MCP failures.
+- `proxy.Diagnose` for applications that need the same redacted preflight report without invoking the CLI.
 
 ### Changed
 

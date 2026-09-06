@@ -94,6 +94,18 @@ Run the proxy:
 go run ./cmd/aws-mcp-proxy <SigV4 MCP endpoint URL> [flags]
 ```
 
+Diagnose configuration and the effective AWS identity before wiring the proxy
+into an MCP client:
+
+```bash
+go run ./cmd/aws-mcp-proxy doctor https://aws-mcp.us-east-1.api.aws/mcp \
+  --profile <profile>
+```
+
+Add `--probe` to perform a non-mutating MCP initialize and `tools/list` check.
+Use `--json` for automation. The doctor command never changes AWS configuration
+or runs login commands on the user's behalf.
+
 For example, the public AWS documentation MCP endpoint can be queried with
 strictly unsigned traffic. `--skip-auth` never loads credentials or signs any
 upstream request:

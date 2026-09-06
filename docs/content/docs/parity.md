@@ -35,6 +35,12 @@ This project targets **parity+** with [aws/mcp-proxy-for-aws](https://github.com
 
 `--help` and `--version` are available on both.
 
+## Additional commands
+
+| Command  | Status                                           | Notes                                                                                                     |
+| -------- | ------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| `doctor` | <span class="badge badge--add">Added here</span> | Non-mutating configuration, credential, STS identity, and optional MCP endpoint connectivity diagnostics. |
+
 ## Behavior differences
 
 Where this proxy diverges from upstream, it leans toward resilience and convenience — the "+" in parity+:

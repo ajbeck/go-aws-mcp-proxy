@@ -5,7 +5,7 @@ description: Run the complete SigV4 MCP proxy inside a Go process.
 weight: 35
 kicker: Documentation
 ---
-The supported embedding API is `proxy.Run`. It keeps authentication, metadata,
+The supported runtime embedding API is `proxy.Run`. It keeps authentication, metadata,
 tool filtering, profile switching, recovery, and MCP forwarding on the same path
 as the command-line application.
 
@@ -57,3 +57,30 @@ The package intentionally does not expose a raw signed `http.Client`. Metadata
 injection, read-only enforcement, dynamic tool reconciliation, profile routing,
 and lazy recovery operate above HTTP; bypassing `Run` would omit those proxy
 semantics.
+
+## Run preflight diagnostics
+
+`proxy.Diagnose` returns the same redacted configuration and AWS identity report
+as the `doctor` command. It does not contact the configured MCP endpoint unless
+`DiagnoseOptions.Probe` is true:
+
+```go
+report := proxy.Diagnose(ctx, proxy.Config{
+	Endpoint: new("https://aws-mcp.us-east-1.api.aws/mcp"),
+	Service:  new("aws-mcp"),
+	Region:   new("us-east-1"),
+}, proxy.DiagnoseOptions{})
+if report.Healthy == nil || !*report.Healthy {
+	// Render or marshal report.Checks for the user.
+}
+```
+
+The report includes credential source and expiration metadata plus the account,
+ARN, and user ID returned by STS `GetCallerIdentity`. It never contains access
+keys, secret keys, or session tokens.
+
+The repository includes a runnable offline diagnostic example:
+
+```bash
+go test ./proxy -run '^ExampleDiagnose$' -v
+```
