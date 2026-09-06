@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/ajbeck/go-aws-mcp-proxy/proxy"
 )
@@ -155,9 +156,15 @@ func (o Options) withDefaults() Options {
 	}
 	if o.RunProxy == nil {
 		o.RunProxy = func(ctx context.Context, cfg proxy.Config, logger *slog.Logger) error {
+			transport, restore, err := isolatedStdioTransport()
+			if err != nil {
+				return err
+			}
+			defer restore()
 			return proxy.Run(ctx, cfg, proxy.RunOptions{
-				Logger:  logger,
-				Version: o.Version,
+				Logger:    logger,
+				Transport: transport,
+				Version:   o.Version,
 			})
 		}
 	}
@@ -168,6 +175,38 @@ func (o Options) withDefaults() Options {
 		o.Stdout = os.Stdout
 	}
 	return o
+}
+
+// isolatedStdioTransport captures the MCP input before replacing process-wide
+// stdin with the null device. AWS SDK credential_process commands inherit
+// os.Stdin, so this prevents them from reading or retaining the MCP JSON-RPC
+// pipe while the proxy continues to use the captured input.
+func isolatedStdioTransport() (*mcp.IOTransport, func(), error) {
+	mcpInput := os.Stdin
+	nullInput, err := os.Open(os.DevNull)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open null device for child process stdin: %w", err)
+	}
+	os.Stdin = nullInput
+
+	restore := func() {
+		if os.Stdin == nullInput {
+			os.Stdin = mcpInput
+		}
+		_ = nullInput.Close()
+	}
+	return &mcp.IOTransport{
+		Reader: mcpInput,
+		Writer: nopWriteCloser{Writer: os.Stdout},
+	}, restore, nil
+}
+
+type nopWriteCloser struct {
+	io.Writer
+}
+
+func (nopWriteCloser) Close() error {
+	return nil
 }
 
 func (a app) config(lookupEnv LookupEnv) proxy.Config {
