@@ -80,6 +80,11 @@ func TestRunBindsDependenciesIntoAppRun(t *testing.T) {
 	if run.config.SkipAuth == nil || !*run.config.SkipAuth {
 		t.Fatalf("SkipAuth = %#v", run.config.SkipAuth)
 	}
+	assertDuration(t, "Timeout", run.config.Timeout, 180*time.Second)
+	assertDuration(t, "ConnectTimeout", run.config.ConnectTimeout, 60*time.Second)
+	assertDuration(t, "ReadTimeout", run.config.ReadTimeout, 120*time.Second)
+	assertDuration(t, "WriteTimeout", run.config.WriteTimeout, 180*time.Second)
+	assertDuration(t, "ToolTimeout", run.config.ToolTimeout, 300*time.Second)
 }
 
 func TestRunAcceptsGroupedProfilesAndMetadata(t *testing.T) {
@@ -132,6 +137,61 @@ func TestRunValidatesRetryRange(t *testing.T) {
 				t.Fatalf("stderr = %q", stderr.String())
 			}
 		})
+	}
+}
+
+func TestRunRejectsNegativeTimeouts(t *testing.T) {
+	flags := []string{"--timeout", "--connect-timeout", "--read-timeout", "--write-timeout", "--tool-timeout"}
+	for _, flag := range flags {
+		t.Run(flag, func(t *testing.T) {
+			run := &fakeProxyRun{}
+			var stderr bytes.Buffer
+			code := Run(t.Context(), []string{
+				"https://service.us-east-1.api.aws/mcp",
+				flag, "-1",
+			}, Options{
+				LookupEnv: lookupEnv(nil),
+				RunProxy:  run.call,
+				Stderr:    &stderr,
+			})
+
+			if code == exitOK || run.called {
+				t.Fatalf("Run() code = %d, called = %v", code, run.called)
+			}
+			if !strings.Contains(stderr.String(), "greater than or equal to 0") {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunAcceptsZeroTimeouts(t *testing.T) {
+	run := &fakeProxyRun{}
+	var stderr bytes.Buffer
+	code := Run(t.Context(), []string{
+		"https://service.us-east-1.api.aws/mcp",
+		"--timeout", "0",
+		"--connect-timeout", "0",
+		"--read-timeout", "0",
+		"--write-timeout", "0",
+		"--tool-timeout", "0",
+	}, Options{
+		LookupEnv: lookupEnv(nil),
+		RunProxy:  run.call,
+		Stderr:    &stderr,
+	})
+
+	if code != exitOK {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	for name, value := range map[string]*time.Duration{
+		"Timeout":        run.config.Timeout,
+		"ConnectTimeout": run.config.ConnectTimeout,
+		"ReadTimeout":    run.config.ReadTimeout,
+		"WriteTimeout":   run.config.WriteTimeout,
+		"ToolTimeout":    run.config.ToolTimeout,
+	} {
+		assertDuration(t, name, value, 0)
 	}
 }
 
@@ -343,5 +403,12 @@ func lookupEnv(values map[string]string) LookupEnv {
 	return func(name string) (string, bool) {
 		value, ok := values[name]
 		return value, ok
+	}
+}
+
+func assertDuration(t *testing.T, name string, got *time.Duration, want time.Duration) {
+	t.Helper()
+	if got == nil || *got != want {
+		t.Fatalf("%s = %#v, want %s", name, got, want)
 	}
 }
