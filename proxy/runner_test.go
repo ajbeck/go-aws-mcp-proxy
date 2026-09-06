@@ -30,6 +30,26 @@ type fakeConnector struct {
 	sessionsByProfile map[string]*fakeSession
 }
 
+func TestIsServerClosingErrorRecognizesPeerShutdown(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "MCP connection closed", err: mcp.ErrConnectionClosed, want: true},
+		{name: "wrapped closed pipe", err: fmt.Errorf("send notification: %w", io.ErrClosedPipe), want: true},
+		{name: "unrelated I/O error", err: io.ErrUnexpectedEOF, want: false},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := isServerClosingError(test.err); got != test.want {
+				t.Fatalf("isServerClosingError(%v) = %v, want %v", test.err, got, test.want)
+			}
+		})
+	}
+}
+
 func (c *fakeConnector) Connect(_ context.Context, cfg Config, params *mcp.InitializeParams) (UpstreamSession, error) {
 	c.called = true
 	c.cfg = cfg
