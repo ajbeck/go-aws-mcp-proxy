@@ -289,11 +289,12 @@ func (r *proxyRun) registerUpstreamTools(ctx context.Context, upstream UpstreamS
 	}
 
 	desired := make(map[string]*mcp.Tool)
+	profileArguments := make(map[string]profileArgumentMode)
 	for _, tool := range filterTools(result.Tools, enabled(r.config.ReadOnly)) {
 		if tool == nil || tool.Name == "" {
 			continue
 		}
-		desired[tool.Name] = r.prepareTool(tool)
+		desired[tool.Name], profileArguments[tool.Name] = r.prepareTool(tool)
 	}
 
 	var removed []string
@@ -312,7 +313,7 @@ func (r *proxyRun) registerUpstreamTools(ctx context.Context, upstream UpstreamS
 		if !sessionChanged && reflect.DeepEqual(r.tools.registered[name], tool) {
 			continue
 		}
-		r.addTool(tool, upstream)
+		r.addTool(tool, upstream, profileArguments[name])
 		changed++
 	}
 	r.tools.registered = desired
@@ -416,20 +417,27 @@ func (r *proxyRun) listUpstreamToolsPage(ctx context.Context, upstream UpstreamS
 	}
 }
 
-func (r *proxyRun) prepareTool(tool *mcp.Tool) *mcp.Tool {
+func (r *proxyRun) prepareTool(tool *mcp.Tool) (*mcp.Tool, profileArgumentMode) {
 	localTool := cloneTool(tool)
 	localTool.InputSchema = normalizedInputSchema(localTool.InputSchema)
 	profiles := value(r.config.Profiles)
-	if len(profiles) > 0 && authRequiringTool(localTool.Name) {
+	profileArgument := profileArgumentStrip
+	if schemaDefinesProperty(localTool.InputSchema, "aws_profile") {
+		profileArgument = profileArgumentUpstream
+		if len(profiles) >= 2 && profileRoutableTool(value(r.config.Service), localTool.Name) && r.logger != nil {
+			r.logger.Warn("preserving upstream-owned aws_profile parameter; per-call profile switching is unavailable for this tool", "tool", localTool.Name)
+		}
+	} else if len(profiles) >= 2 && profileRoutableTool(value(r.config.Service), localTool.Name) {
 		localTool.InputSchema = inputSchemaWithProfile(localTool.InputSchema, profiles)
+		profileArgument = profileArgumentProxy
 	}
 	if localTool.OutputSchema != nil && !schemaIsObject(localTool.OutputSchema) {
 		localTool.OutputSchema = nil
 	}
-	return localTool
+	return localTool, profileArgument
 }
 
-func (r *proxyRun) addTool(localTool *mcp.Tool, upstream UpstreamSession) {
+func (r *proxyRun) addTool(localTool *mcp.Tool, upstream UpstreamSession, profileArgument profileArgumentMode) {
 	r.server.AddTool(localTool, func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		r.downstream.begin(req.Session)
 		defer r.downstream.end(req.Session)
@@ -442,7 +450,7 @@ func (r *proxyRun) addTool(localTool *mcp.Tool, upstream UpstreamSession) {
 		}
 		defer cancel()
 
-		result, err := r.callUpstreamTool(callCtx, upstream, req)
+		result, err := r.callUpstreamTool(callCtx, upstream, req, profileArgument)
 		if err != nil {
 			proxyErr := classifyError(err)
 			if r.logger != nil {
@@ -523,19 +531,12 @@ func (t *upstreamTools) contains(name string) bool {
 	return t.registered[name] != nil
 }
 
-func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSession, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args, profile, err := argumentsAndProfile(req.Params.Arguments)
+func (r *proxyRun) callUpstreamTool(ctx context.Context, upstream UpstreamSession, req *mcp.CallToolRequest, profileArgument profileArgumentMode) (*mcp.CallToolResult, error) {
+	args, profile, err := argumentsAndProfile(req.Params.Arguments, profileArgument)
 	if err != nil {
 		return nil, err
 	}
 	if profile == "" {
-		return r.callDefaultSessionTool(ctx, upstream, forwardedToolParams(req, rawArguments(req.Params.Arguments)))
-	}
-
-	if !authRequiringTool(req.Params.Name) {
-		if r.logger != nil {
-			r.logger.Warn("ignoring aws_profile on non-auth tool", "tool", req.Params.Name)
-		}
 		return r.callDefaultSessionTool(ctx, upstream, forwardedToolParams(req, args))
 	}
 
@@ -826,16 +827,25 @@ func rawArguments(arguments json.RawMessage) any {
 	return arguments
 }
 
-var authRequiringTools = map[string]bool{
-	"aws___call_aws":             true,
-	"aws___run_script":           true,
-	"aws___get_presigned_url":    true,
-	"aws___get_tasks":            true,
-	"aws___suggest_aws_commands": true,
+type profileArgumentMode uint8
+
+const (
+	profileArgumentStrip profileArgumentMode = iota
+	profileArgumentProxy
+	profileArgumentUpstream
+)
+
+var awsMCPPublicTools = map[string]bool{
+	"aws___search_documentation":      true,
+	"aws___read_documentation":        true,
+	"aws___recommend":                 true,
+	"aws___list_regions":              true,
+	"aws___get_regional_availability": true,
+	"aws___retrieve_skill":            true,
 }
 
-func authRequiringTool(name string) bool {
-	return authRequiringTools[name]
+func profileRoutableTool(service, name string) bool {
+	return service != "aws-mcp" || !awsMCPPublicTools[name]
 }
 
 func inputSchemaWithProfile(schema any, profiles []string) any {
@@ -851,6 +861,12 @@ func inputSchemaWithProfile(schema any, profiles []string) any {
 		"enum":        append([]string(nil), profiles...),
 	}
 	return object
+}
+
+func schemaDefinesProperty(schema any, name string) bool {
+	properties, _ := schemaObject(schema)["properties"].(map[string]any)
+	_, ok := properties[name]
+	return ok
 }
 
 func schemaObject(schema any) map[string]any {
@@ -883,9 +899,12 @@ func deepCopyMap(value map[string]any) map[string]any {
 	return decoded
 }
 
-func argumentsAndProfile(arguments json.RawMessage) (any, string, error) {
+func argumentsAndProfile(arguments json.RawMessage, mode profileArgumentMode) (any, string, error) {
 	if len(arguments) == 0 {
 		return map[string]any{}, "", nil
+	}
+	if mode == profileArgumentUpstream {
+		return arguments, "", nil
 	}
 	var decoded map[string]any
 	if err := json.Unmarshal(arguments, &decoded); err != nil {
@@ -894,6 +913,11 @@ func argumentsAndProfile(arguments json.RawMessage) (any, string, error) {
 	value, ok := decoded["aws_profile"]
 	if !ok {
 		return arguments, "", nil
+	}
+	if mode == profileArgumentStrip {
+		delete(decoded, "aws_profile")
+		encoded, err := json.Marshal(decoded)
+		return json.RawMessage(encoded), "", err
 	}
 	profile, ok := value.(string)
 	if !ok || profile == "" {
