@@ -111,6 +111,9 @@ func (r *proxyRun) run(ctx context.Context) error {
 }
 
 func isServerClosingError(err error) bool {
+	if errors.Is(err, mcp.ErrConnectionClosed) || errors.Is(err, io.ErrClosedPipe) {
+		return true
+	}
 	for current := err; current != nil; current = errors.Unwrap(current) {
 		encoded, marshalErr := json.Marshal(current)
 		if marshalErr != nil {
