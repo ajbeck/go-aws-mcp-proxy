@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1254,7 +1255,7 @@ func TestProfileOverrideInvalidatesFailedSession(t *testing.T) {
 			Name:      "aws___call_aws",
 			Arguments: json.RawMessage(`{"aws_profile":"dev"}`),
 		},
-	})
+	}, profileArgumentProxy)
 	if err == nil || !strings.Contains(err.Error(), "session closed") {
 		t.Fatalf("callUpstreamTool() error = %v, want failed profile session error", err)
 	}
@@ -1430,6 +1431,7 @@ func TestRunInjectsAWSProfileIntoAuthToolSchema(t *testing.T) {
 	go func() {
 		errs <- Run(ctx, Config{
 			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Service:  new("aws-mcp"),
 			Profiles: new([]string{"default", "dev"}),
 		}, options)
 	}()
@@ -1467,6 +1469,114 @@ func TestRunInjectsAWSProfileIntoAuthToolSchema(t *testing.T) {
 	waitForProxyRunExit(t, ctx, errs)
 }
 
+func TestPrepareToolUsesEndpointProfileRoutingPolicy(t *testing.T) {
+	tests := []struct {
+		name             string
+		service          string
+		toolName         string
+		profiles         []string
+		existingProfile  bool
+		wantMode         profileArgumentMode
+		wantProfileField bool
+	}{
+		{
+			name:             "aws mcp public knowledge tool",
+			service:          "aws-mcp",
+			toolName:         "aws___get_regional_availability",
+			profiles:         []string{"default", "dev"},
+			wantMode:         profileArgumentStrip,
+			wantProfileField: false,
+		},
+		{
+			name:             "aws mcp future authenticated tool",
+			service:          "aws-mcp",
+			toolName:         "aws___future_account_action",
+			profiles:         []string{"default", "dev"},
+			wantMode:         profileArgumentProxy,
+			wantProfileField: true,
+		},
+		{
+			name:             "eks tool",
+			service:          "eks-mcp",
+			toolName:         "eks___list_clusters",
+			profiles:         []string{"default", "dev"},
+			wantMode:         profileArgumentProxy,
+			wantProfileField: true,
+		},
+		{
+			name:             "one profile does not advertise switching",
+			service:          "eks-mcp",
+			toolName:         "eks___list_clusters",
+			profiles:         []string{"default"},
+			wantMode:         profileArgumentStrip,
+			wantProfileField: false,
+		},
+		{
+			name:             "upstream owned profile field",
+			service:          "eks-mcp",
+			toolName:         "eks___future_tool",
+			profiles:         []string{"default", "dev"},
+			existingProfile:  true,
+			wantMode:         profileArgumentUpstream,
+			wantProfileField: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			properties := map[string]any{}
+			if test.existingProfile {
+				properties["aws_profile"] = map[string]any{
+					"type": "string",
+					"enum": []string{"upstream"},
+				}
+			}
+			run := proxyRun{config: Config{
+				Service:  new(test.service),
+				Profiles: new(test.profiles),
+			}}
+
+			tool, mode := run.prepareTool(&mcp.Tool{
+				Name:        test.toolName,
+				InputSchema: map[string]any{"type": "object", "properties": properties},
+			})
+
+			if mode != test.wantMode {
+				t.Fatalf("profile argument mode = %v, want %v", mode, test.wantMode)
+			}
+			if got := propertyExists(tool.InputSchema, "aws_profile"); got != test.wantProfileField {
+				t.Fatalf("aws_profile exists = %v, want %v", got, test.wantProfileField)
+			}
+			if test.existingProfile {
+				profileSchema := schemaProperty(t, tool.InputSchema, "aws_profile")
+				if !reflect.DeepEqual(profileSchema["enum"], []string{"upstream"}) &&
+					!reflect.DeepEqual(profileSchema["enum"], []any{"upstream"}) {
+					t.Fatalf("upstream aws_profile schema was changed: %#v", profileSchema)
+				}
+			}
+		})
+	}
+}
+
+func TestCallUpstreamToolPreservesUpstreamOwnedAWSProfile(t *testing.T) {
+	session := &fakeSession{callResult: &mcp.CallToolResult{}}
+	run := proxyRun{config: Config{Profiles: new([]string{"default", "dev"})}}
+
+	_, err := run.callUpstreamTool(t.Context(), session, &mcp.CallToolRequest{
+		Params: &mcp.CallToolParamsRaw{
+			Name:      "eks___future_tool",
+			Arguments: json.RawMessage(`{"aws_profile":"upstream","cluster":"test"}`),
+		},
+	}, profileArgumentUpstream)
+	if err != nil {
+		t.Fatalf("callUpstreamTool() error = %v", err)
+	}
+	args := decodeRawArgs(t, session.callArgs)
+	if args["aws_profile"] != "upstream" || args["cluster"] != "test" {
+		t.Fatalf("upstream call args = %#v", args)
+	}
+}
+
 func TestRunRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	defaultSession := &fakeSession{
@@ -1492,6 +1602,7 @@ func TestRunRoutesAWSProfileOverrideToDedicatedSession(t *testing.T) {
 	go func() {
 		errs <- Run(ctx, Config{
 			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Service:  new("aws-mcp"),
 			Profiles: new([]string{"default", "dev"}),
 		}, options)
 	}()
@@ -1924,6 +2035,7 @@ func TestRunStripsAWSProfileFromNonAuthTool(t *testing.T) {
 	go func() {
 		errs <- Run(ctx, Config{
 			Endpoint: new("https://service.us-east-1.api.aws/mcp"),
+			Service:  new("aws-mcp"),
 			Profiles: new([]string{"default", "dev"}),
 		}, options)
 	}()
