@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,7 +75,10 @@ type clientOptions struct {
 	Version       string
 }
 
-const maxHTTPErrorBodyBytes = 4096
+const (
+	maxHTTPErrorBodyBytes = 4096
+	maxRetryDelay         = 30 * time.Second
+)
 
 func newClient(ctx context.Context, cfg Config, base *http.Client, options clientOptions) (*http.Client, error) {
 	transport, err := newRoundTripper(ctx, cfg, baseRoundTripper(base), options)
@@ -87,6 +91,11 @@ func newClient(ctx context.Context, cfg Config, base *http.Client, options clien
 		client = *base
 	}
 	client.Transport = transport
+	// SigV4 authenticates a specific request target. Keep the proxy on the
+	// configured endpoint and surface redirect responses without following them.
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
 	if positiveDuration(cfg.Timeout) {
 		client.Timeout = *cfg.Timeout
 	}
@@ -449,8 +458,16 @@ func (t upstreamErrorRoundTripper) RoundTrip(req *http.Request) (*http.Response,
 	// HTTP status codes are part of the Streamable HTTP protocol. In particular,
 	// an optional standalone SSE GET may return 405, which the MCP client treats
 	// as a signal to continue over the POST request-response channel. Preserve
-	// the response so the MCP transport can apply its protocol-specific handling.
-	return resp, nil
+	// non-POST responses so the MCP transport can apply its protocol-specific
+	// handling. POST failures are proxy request failures and retain their status,
+	// JSON-RPC detail, and retry guidance as a structured error.
+	if req.Method != http.MethodPost {
+		return resp, nil
+	}
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	return nil, upstreamErr
 }
 
 func (t sigV4RoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -495,6 +512,7 @@ type upstreamHTTPError struct {
 	jsonrpcCode    *int64
 	jsonrpcMessage string
 	jsonrpcData    string
+	retryAfter     time.Duration
 }
 
 func (e *upstreamHTTPError) Error() string {
@@ -529,6 +547,9 @@ func (e *upstreamHTTPError) logAttrs(req *http.Request) []slog.Attr {
 	if e.jsonrpcData != "" {
 		attrs = append(attrs, slog.String("jsonrpc_data_excerpt", e.jsonrpcData))
 	}
+	if e.retryAfter > 0 {
+		attrs = append(attrs, slog.Duration("retry_after", e.retryAfter))
+	}
 	return attrs
 }
 
@@ -541,9 +562,31 @@ func newUpstreamHTTPError(resp *http.Response) *upstreamHTTPError {
 		contentType:   resp.Header.Get("Content-Type"),
 		bodyExcerpt:   bodyExcerpt,
 		bodyTruncated: truncated,
+		retryAfter:    parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()),
 	}
 	err.parseJSONRPCError(body)
 	return err
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		if seconds > int64(maxRetryDelay/time.Second) {
+			return maxRetryDelay
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	date, err := http.ParseTime(value)
+	if err != nil || !date.After(now) {
+		return 0
+	}
+	return date.Sub(now)
 }
 
 func readHTTPErrorBody(resp *http.Response) ([]byte, bool) {

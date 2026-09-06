@@ -23,6 +23,7 @@ const (
 	reasonCredentialUnavailable  string        = "credential_unavailable"
 	reasonCredentialUnauthorized string        = "credential_unauthorized"
 	reasonCredentialForbidden    string        = "credential_forbidden"
+	reasonUpstreamEmptyTools     string        = "upstream_empty_tools"
 	reasonUpstreamJSONRPC        string        = "upstream_jsonrpc_error"
 	reasonUpstreamHTTP           string        = "upstream_http_error"
 	reasonUpstreamRetryableHTTP  string        = "upstream_retryable_http"
@@ -92,6 +93,16 @@ func classifyError(err error) *proxyError {
 }
 
 func classifyUpstreamHTTPError(err *upstreamHTTPError) *proxyError {
+	if err.jsonrpcMessage != "" && err.statusCode != http.StatusUnauthorized && err.statusCode != http.StatusForbidden {
+		return newProxyError(
+			categoryUserAction,
+			reasonUpstreamJSONRPC,
+			fmt.Sprintf("the upstream MCP endpoint returned JSON-RPC error %d", value(err.jsonrpcCode)),
+			"Ask the user to inspect the proxy logs and upstream MCP endpoint configuration.",
+			upstreamHTTPDetail(err, true),
+			err,
+		)
+	}
 	switch err.statusCode {
 	case http.StatusUnauthorized:
 		return newProxyError(
@@ -111,7 +122,12 @@ func classifyUpstreamHTTPError(err *upstreamHTTPError) *proxyError {
 			upstreamHTTPDetail(err, true),
 			err,
 		)
-	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+	case http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusBadGateway,
+		http.StatusServiceUnavailable,
+		http.StatusGatewayTimeout:
 		return newProxyError(
 			categoryRetryable,
 			reasonUpstreamRetryableHTTP,
