@@ -356,6 +356,71 @@ func TestDeferredInitializeClientMatchesUpstreamCompatibilityNames(t *testing.T)
 	}
 }
 
+func TestRunLazyConnectDefersGenericClientAndRetriesLaterRequest(t *testing.T) {
+	serverTransport, clientTransport := mcp.NewInMemoryTransports()
+	upstream := &fakeSession{
+		result: &mcp.InitializeResult{Capabilities: &mcp.ServerCapabilities{Tools: &mcp.ToolCapabilities{}}},
+		tools:  []*mcp.Tool{{Name: "recovered", InputSchema: map[string]any{"type": "object"}}},
+	}
+	connector := &fakeConnector{err: errors.New("credentials not ready"), sess: upstream}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Config{
+			Endpoint:    new("https://service.us-east-1.api.aws/mcp"),
+			LazyConnect: new(true),
+		}, RunOptions{Connector: connector, Transport: serverTransport, Version: "test-version"})
+	}()
+
+	client := mcp.NewClient(&mcp.Implementation{Name: "generic-client", Version: "1.0.0"}, nil)
+	clientSession, err := client.Connect(ctx, clientTransport, nil)
+	if err != nil {
+		t.Fatalf("client.Connect() error = %v", err)
+	}
+	if connector.called {
+		t.Fatal("lazy connect contacted upstream during initialize")
+	}
+	if _, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{}); err == nil || !strings.Contains(err.Error(), "credentials not ready") {
+		t.Fatalf("first ListTools() error = %v", err)
+	}
+
+	connector.err = nil
+	tools, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("second ListTools() error = %v", err)
+	}
+	if findTool(tools.Tools, "recovered") == nil {
+		t.Fatalf("tools = %#v, want recovered", tools.Tools)
+	}
+
+	if err := clientSession.Close(); err != nil {
+		t.Fatalf("clientSession.Close() error = %v", err)
+	}
+	waitForProxyRunExit(t, ctx, errCh)
+}
+
+func TestEnsureUpstreamReadyReplacesDegradedCredentialSession(t *testing.T) {
+	healthy := &fakeSession{tools: []*mcp.Tool{{Name: "healthy", InputSchema: map[string]any{"type": "object"}}}}
+	run := proxyRun{
+		config:    Config{Endpoint: new("https://service.us-east-1.api.aws/mcp")},
+		connector: &fakeConnector{sess: healthy},
+		server:    mcp.NewServer(&mcp.Implementation{Name: "proxy", Version: "test"}, nil),
+	}
+	run.upstream.Set(degradedUpstreamSession{err: errors.New("credentials unavailable")}, nil)
+
+	got, err := run.ensureUpstreamReady(t.Context(), &mcp.InitializeParams{})
+	if err != nil {
+		t.Fatalf("ensureUpstreamReady() error = %v", err)
+	}
+	if got != healthy || run.upstream.Session() != healthy {
+		t.Fatalf("upstream = %#v, want healthy replacement", got)
+	}
+	if !run.tools.contains("healthy") {
+		t.Fatalf("registered tools = %#v", run.tools.registered)
+	}
+}
+
 func TestRunOptionsHTTPClientIsUsedByDefaultConnector(t *testing.T) {
 	const headerName = "X-Test-Proxy-Client"
 	const headerValue = "custom"
@@ -943,8 +1008,8 @@ func TestProxyStatusRequestsReconnectWhenCredentialsBecomeAvailableAfterDegraded
 		t.Fatalf("reason = %#v, want reconnect required", status["reason"])
 	}
 	text := result.Content[0].(*mcp.TextContent).Text
-	if !strings.Contains(text, "restart or reconnect") {
-		t.Fatalf("status text = %q, want reconnect guidance", text)
+	if !strings.Contains(text, "fresh session") {
+		t.Fatalf("status text = %q, want automatic retry guidance", text)
 	}
 }
 

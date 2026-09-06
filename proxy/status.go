@@ -97,10 +97,10 @@ func (r *proxyRun) proxyStatus(ctx context.Context) *mcp.CallToolResult {
 		if err := r.upstream.DegradedError(); err != nil {
 			status = "degraded"
 			proxyErr = newProxyError(
-				categoryUserAction,
+				categoryRetryable,
 				reasonReconnectNeeded,
 				"AWS credentials are now available, but upstream tools were not discovered for this MCP session",
-				"Ask the user to restart or reconnect the MCP server so the proxy can discover the upstream tools.",
+				"Retry tools/list or the upstream tool request; the proxy will establish a fresh session with the available credentials.",
 				"",
 				err,
 			)

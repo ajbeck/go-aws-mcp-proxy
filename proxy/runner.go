@@ -160,10 +160,15 @@ func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 				return nil, fmt.Errorf("initialize params have unexpected type %T", req.GetParams())
 			}
 
-			if deferredInitializeClient(params) {
+			if enabled(r.config.LazyConnect) || deferredInitializeClient(params) {
 				r.profiles.SetInitializeParams(params)
 				if r.logger != nil {
-					r.logger.Info("deferring upstream connect for MCP client", "client_name", params.ClientInfo.Name, "client_version", params.ClientInfo.Version)
+					var clientName, clientVersion string
+					if params.ClientInfo != nil {
+						clientName = params.ClientInfo.Name
+						clientVersion = params.ClientInfo.Version
+					}
+					r.logger.Info("deferring upstream connect for MCP client", "client_name", clientName, "client_version", clientVersion, "configured", enabled(r.config.LazyConnect))
 				}
 			} else {
 				if _, err := r.ensureUpstreamReady(ctx, params); err != nil {
@@ -188,13 +193,9 @@ func (r *proxyRun) ensureUpstreamMiddleware() mcp.Middleware {
 			if method != "tools/list" && method != "tools/call" {
 				return next(ctx, method, req)
 			}
-			upstream := r.upstream.Session()
-			if upstream == nil {
-				var err error
-				upstream, err = r.ensureUpstreamReady(ctx, initializeParamsForRequest(req))
-				if err != nil {
-					return nil, classifyError(err)
-				}
+			upstream, err := r.ensureUpstreamReady(ctx, initializeParamsForRequest(req))
+			if err != nil {
+				return nil, classifyError(err)
 			}
 			if method == "tools/list" || r.shouldRefreshForToolCall(req) {
 				if err := r.registerUpstreamTools(ctx, upstream); err != nil {
@@ -239,14 +240,19 @@ func initializeParamsForRequest(req mcp.Request) *mcp.InitializeParams {
 }
 
 func (r *proxyRun) ensureUpstreamReady(ctx context.Context, params *mcp.InitializeParams) (UpstreamSession, error) {
-	if upstream := r.upstream.Session(); upstream != nil {
+	if upstream := r.upstream.Session(); upstream != nil && !degradedSession(upstream) {
 		return upstream, nil
 	}
 
 	r.connectMu.Lock()
 	defer r.connectMu.Unlock()
 	if upstream := r.upstream.Session(); upstream != nil {
-		return upstream, nil
+		if !degradedSession(upstream) {
+			return upstream, nil
+		}
+		if err := r.upstream.Invalidate(upstream); err != nil && r.logger != nil {
+			r.logger.Warn("failed to close degraded upstream session", "error", err)
+		}
 	}
 
 	upstream, err := r.connectUpstream(ctx, params)

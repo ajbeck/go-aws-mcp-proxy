@@ -329,6 +329,7 @@ func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
 			"AWS_REGION": "us-west-2",
 		},
 		AllowEmptyTools:  new(true),
+		LazyConnect:      new(true),
 		ReadOnly:         new(true),
 		LogLevel:         new("DEBUG"),
 		Retries:          new(3),
@@ -368,6 +369,9 @@ func TestAppConfigUsesEndpointAndEnvironmentFallbacks(t *testing.T) {
 	}
 	if cfg.AllowEmptyTools == nil || !*cfg.AllowEmptyTools {
 		t.Fatalf("AllowEmptyTools = %#v, want true", cfg.AllowEmptyTools)
+	}
+	if cfg.LazyConnect == nil || !*cfg.LazyConnect {
+		t.Fatalf("LazyConnect = %#v, want true", cfg.LazyConnect)
 	}
 	if cfg.Timeout == nil || *cfg.Timeout != 10500*time.Millisecond {
 		t.Fatalf("Timeout = %#v", cfg.Timeout)
@@ -485,7 +489,7 @@ func TestAppConfigLeavesOmittedOptionalValuesUnset(t *testing.T) {
 	if cfg.Profiles != nil {
 		t.Fatalf("Profiles = %#v, want nil", cfg.Profiles)
 	}
-	if cfg.AllowEmptyTools != nil || cfg.ReadOnly != nil || cfg.Retries != nil || cfg.Timeout != nil {
+	if cfg.AllowEmptyTools != nil || cfg.LazyConnect != nil || cfg.ReadOnly != nil || cfg.Retries != nil || cfg.Timeout != nil {
 		t.Fatalf("optional defaults were unexpectedly set: %+v", cfg)
 	}
 }

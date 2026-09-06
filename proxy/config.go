@@ -15,6 +15,7 @@ type Config struct {
 	Metadata *map[string]string
 
 	AllowEmptyTools *bool
+	LazyConnect     *bool
 	ReadOnly        *bool
 	LogLevel        *string
 	Retries         *int
