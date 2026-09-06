@@ -138,6 +138,12 @@ Install from a GitHub release on Linux or macOS:
 curl -fsSL https://raw.githubusercontent.com/ajbeck/go-aws-mcp-proxy/main/install.sh | sh
 ```
 
+Pin both the installer and release for reproducible setup:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ajbeck/go-aws-mcp-proxy/v0.4.0/install.sh | VERSION=v0.4.0 sh
+```
+
 ## Planning
 
 The first implementation scope, workflow plan, AWS MCP server rewrite sequence,

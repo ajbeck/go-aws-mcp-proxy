@@ -5,7 +5,6 @@ description: Install the aws-mcp-proxy binary on Linux or macOS.
 weight: 10
 kicker: Documentation
 ---
-
 ## Install script
 
 Install the latest release on Linux or macOS:
@@ -15,8 +14,32 @@ Install the latest release on Linux or macOS:
 The script downloads the correct binary for your platform and installs it to `/usr/local/bin` by default. Override the destination with `BIN_DIR`:
 
 ```bash
-BIN_DIR="$HOME/.local/bin" curl -fsSL https://raw.githubusercontent.com/ajbeck/go-aws-mcp-proxy/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ajbeck/go-aws-mcp-proxy/main/install.sh | BIN_DIR="$HOME/.local/bin" sh
 ```
+
+For reproducible installation, pin both the installer source and the release:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ajbeck/go-aws-mcp-proxy/v0.4.0/install.sh | VERSION=v0.4.0 sh
+```
+
+## Verify a release
+
+Every release archive includes a SHA-256 file and an SPDX JSON SBOM. GitHub also
+stores build-provenance and SBOM attestations for each archive. After downloading
+an archive and its matching `.sha256` file, verify all three records:
+
+```bash
+sha256sum --check aws-mcp-proxy-linux-amd64.tar.gz.sha256
+gh attestation verify aws-mcp-proxy-linux-amd64.tar.gz \
+  --repo ajbeck/go-aws-mcp-proxy
+gh attestation verify aws-mcp-proxy-linux-amd64.tar.gz \
+  --repo ajbeck/go-aws-mcp-proxy \
+  --predicate-type https://spdx.dev/Document/v2.3
+```
+
+On macOS, use `shasum -a 256 -c` for the checksum when `sha256sum` is not
+installed.
 
 ## Build from source
 
