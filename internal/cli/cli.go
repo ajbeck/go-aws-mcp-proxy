@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/url"
 	"os"
+	"reflect"
 	"strings"
 	"time"
 
@@ -39,11 +40,11 @@ type app struct {
 	Endpoint *string `arg:"" help:"SigV4 MCP endpoint URL."`
 
 	Service  *string  `help:"AWS service name for SigV4 signing. Inferred from endpoint when omitted."`
-	Profiles []string `name:"profile" env:"AWS_MCP_PROXY_PROFILES,AWS_PROFILE" help:"AWS profile(s) to use. First profile is the default." sep:" " placeholder:"PROFILE"`
+	Profiles []string `name:"profile" type:"grouped-strings" help:"AWS profile(s) to use. First profile is the default." placeholder:"PROFILE"`
 	Region   *string  `help:"AWS region to sign. Inferred from endpoint or AWS_REGION when omitted."`
 	CaBundle *string  `name:"ca-bundle" env:"AWS_CA_BUNDLE" help:"Path to a PEM certificate bundle to trust in addition to the system roots." placeholder:"PATH"`
 
-	Metadata map[string]string `help:"Metadata to inject into MCP requests as key=value pairs." mapsep:"none" placeholder:"KEY=VALUE"`
+	Metadata map[string]string `type:"grouped-map" help:"Metadata to inject into MCP requests as key=value pairs." placeholder:"KEY=VALUE"`
 
 	AllowEmptyTools *bool `name:"allow-empty-tools" help:"Allow an upstream endpoint to initialize with no tools."`
 	ReadOnly        *bool `name:"read-only" help:"Disable tools that do not advertise readOnlyHint=true."`
@@ -66,6 +67,9 @@ func (a *app) Run(ctx context.Context, lookupEnv LookupEnv, runProxy RunProxy, s
 	if enabled(a.SkipAuth) && enabled(a.OptionalAuth) {
 		return errors.New("--skip-auth and --optional-auth cannot be used together")
 	}
+	if a.Retries != nil && (*a.Retries < 0 || *a.Retries > 10) {
+		return fmt.Errorf("--retries must be between 0 and 10, got %d", *a.Retries)
+	}
 	cfg := a.config(lookupEnv)
 	return runProxy(ctx, cfg, newLogger(valueOr(a.LogLevel, "ERROR"), stderr))
 }
@@ -83,6 +87,8 @@ func Run(ctx context.Context, args []string, options Options) int {
 		kong.Description("MCP Proxy for AWS"),
 		kong.UsageOnError(),
 		kong.WithHyphenPrefixedParameters(true),
+		kong.NamedMapper("grouped-strings", kong.MapperFunc(decodeGroupedStrings)),
+		kong.NamedMapper("grouped-map", kong.MapperFunc(decodeGroupedMap)),
 		kong.Vars{"version": options.Version},
 		kong.Bind(options.LookupEnv, options.RunProxy),
 		kong.BindTo(ctx, (*context.Context)(nil)),
@@ -185,7 +191,15 @@ func (a app) config(lookupEnv LookupEnv) proxy.Config {
 		SkipAuth:         a.SkipAuth,
 		OptionalAuth:     a.OptionalAuth,
 	}
-	profiles := dedupe(a.Profiles)
+	profiles := a.Profiles
+	if value, ok := lookupEnv("AWS_MCP_PROXY_PROFILES"); ok {
+		profiles = strings.Fields(value)
+	} else if len(profiles) == 0 {
+		if value, ok := lookupEnv("AWS_PROFILE"); ok {
+			profiles = []string{value}
+		}
+	}
+	profiles = dedupe(profiles)
 	if len(profiles) > 0 {
 		cfg.Profiles = new(profiles)
 	}
@@ -193,6 +207,50 @@ func (a app) config(lookupEnv LookupEnv) proxy.Config {
 		cfg.Metadata = new(a.Metadata)
 	}
 	return cfg
+}
+
+func decodeGroupedStrings(ctx *kong.DecodeContext, target reflect.Value) error {
+	count := 0
+	for ctx.Scan.Peek().IsValue() {
+		token, err := ctx.Scan.PopValue("string")
+		if err != nil {
+			return err
+		}
+		value, ok := token.Value.(string)
+		if !ok {
+			return fmt.Errorf("expected string but got %T", token.Value)
+		}
+		target.Set(reflect.Append(target, reflect.ValueOf(value)))
+		count++
+	}
+	if count == 0 {
+		return errors.New("missing value, expecting \"<string>...\"")
+	}
+	return nil
+}
+
+func decodeGroupedMap(ctx *kong.DecodeContext, target reflect.Value) error {
+	count := 0
+	for ctx.Scan.Peek().IsValue() {
+		token, err := ctx.Scan.PopValue("key=value")
+		if err != nil {
+			return err
+		}
+		value, ok := token.Value.(string)
+		if !ok {
+			return fmt.Errorf("expected key=value string but got %T", token.Value)
+		}
+		parts := strings.SplitN(value, "=", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("expected \"<key>=<value>\" but got %q", value)
+		}
+		target.SetMapIndex(reflect.ValueOf(parts[0]), reflect.ValueOf(parts[1]))
+		count++
+	}
+	if count == 0 {
+		return errors.New("missing value, expecting \"<key>=<value>...\"")
+	}
+	return nil
 }
 
 func value[T any](ptr *T) T {
