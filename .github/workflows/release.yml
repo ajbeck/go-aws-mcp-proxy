@@ -89,7 +89,7 @@ jobs:
           release_tag="${MANUAL_RELEASE_TAG:-$AUTOMATED_RELEASE_TAG}"
           release_version="${AUTOMATED_RELEASE_VERSION:-${release_tag#v}}"
 
-          gh release view "$release_tag" --json tagName > /dev/null
+          gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" --json tagName > /dev/null
 
           {
             echo "tag=$release_tag"
@@ -227,4 +227,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.release.outputs.tag }}
-        run: gh release upload "$TAG" dist/* --clobber
+        run: gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
