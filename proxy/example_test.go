@@ -49,6 +49,28 @@ func ExampleRun() {
 	// hello from embedded upstream
 }
 
+// ExampleDiagnose demonstrates an offline configuration preflight. Omit
+// SkipAuth for signed endpoints, and set DiagnoseOptions.Probe to contact the
+// configured MCP endpoint after credentials and identity checks pass.
+func ExampleDiagnose() {
+	report := proxy.Diagnose(context.Background(), proxy.Config{
+		Endpoint: new("https://aws-mcp.us-east-1.api.aws/mcp"),
+		SkipAuth: new(true),
+	}, proxy.DiagnoseOptions{})
+
+	fmt.Println(*report.Healthy)
+	for _, check := range report.Checks {
+		fmt.Printf("%s: %s\n", *check.Name, *check.Status)
+	}
+
+	// Output:
+	// true
+	// configuration: pass
+	// credentials: skip
+	// identity: skip
+	// mcp_probe: skip
+}
+
 type exampleConnector struct{}
 
 func (exampleConnector) Connect(context.Context, proxy.Config, *mcp.InitializeParams) (proxy.UpstreamSession, error) {

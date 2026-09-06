@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net"
@@ -80,6 +81,43 @@ func TestDiagnoseVerifiesEveryConfiguredProfile(t *testing.T) {
 	identityChecks := checksNamed(report, "identity")
 	if len(identityChecks) != 2 || identityChecks[0].Account == nil || identityChecks[0].ARN == nil || identityChecks[0].UserID == nil {
 		t.Fatalf("identity checks = %#v, want two populated identities", identityChecks)
+	}
+}
+
+func TestDiagnosticReportDoesNotExposeCredentialValues(t *testing.T) {
+	report := Diagnose(t.Context(), Config{
+		Endpoint: new("https://aws-mcp.us-east-1.api.aws/mcp"),
+		Service:  new("aws-mcp"),
+		Region:   new("us-east-1"),
+	}, DiagnoseOptions{
+		loadConfig: func(context.Context, Config, []byte) (aws.Config, error) {
+			return aws.Config{
+				Credentials: &staticCredentials{creds: aws.Credentials{
+					AccessKeyID:     "diagnostic-access-key",
+					SecretAccessKey: "diagnostic-secret-key",
+					SessionToken:    "diagnostic-session-token",
+					Source:          "test provider",
+				}},
+				Region: "us-east-1",
+			}, nil
+		},
+		callIdentity: func(context.Context, aws.Config) (*sts.GetCallerIdentityOutput, error) {
+			return &sts.GetCallerIdentityOutput{
+				Account: new("123456789012"),
+				Arn:     new("arn:aws:iam::123456789012:user/doctor"),
+				UserId:  new("doctor-user"),
+			}, nil
+		},
+	})
+
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("json.Marshal(DiagnosticReport) error = %v", err)
+	}
+	for _, secret := range []string{"diagnostic-access-key", "diagnostic-secret-key", "diagnostic-session-token"} {
+		if strings.Contains(string(encoded), secret) {
+			t.Errorf("DiagnosticReport JSON contains credential value %q", secret)
+		}
 	}
 }
 

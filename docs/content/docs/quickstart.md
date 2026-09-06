@@ -5,7 +5,6 @@ description: Bridge an MCP client to an AWS MCP endpoint in a couple of commands
 weight: 20
 kicker: Documentation
 ---
-
 ## Run against a public endpoint
 
 The public AWS documentation MCP endpoint can be queried without SigV4 signing. This is the fastest way to confirm the proxy works end to end:
@@ -23,6 +22,14 @@ aws-mcp-proxy https://<your-endpoint>.api.aws/mcp --profile <profile> --region u
 ```
 
 {{< note >}}The proxy follows the upstream CLI where practical. See [parity with upstream](/docs/parity/) for the deliberate authentication-mode differences.{{< /note >}}
+
+Before adding the signed endpoint to an MCP client, verify its resolved identity:
+
+{{< command >}}aws-mcp-proxy doctor https://<your-endpoint>.api.aws/mcp --profile <profile>{{< /command >}}
+
+The doctor command reports the credential source, expiration, account, and ARN
+without printing credential values. Add `--probe` to check MCP initialize and
+tool discovery.
 
 ## Use best-effort optional authentication
 
