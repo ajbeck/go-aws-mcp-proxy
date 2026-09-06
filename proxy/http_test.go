@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -78,6 +79,84 @@ func (rt *captureRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 		Header:     make(http.Header),
 		Request:    req,
 	}, nil
+}
+
+func TestNewClientRejectsRedirects(t *testing.T) {
+	tests := []struct {
+		name      string
+		signed    bool
+		crossHost bool
+	}{
+		{name: "signed_same_host", signed: true},
+		{name: "signed_cross_host", signed: true, crossHost: true},
+		{name: "unsigned_same_host"},
+		{name: "unsigned_cross_host", crossHost: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var redirectedRequests atomic.Int64
+			target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				redirectedRequests.Add(1)
+			}))
+			defer target.Close()
+
+			location := "/target"
+			if test.crossHost {
+				location = target.URL
+			}
+			source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path == "/target" {
+					redirectedRequests.Add(1)
+					return
+				}
+				http.Redirect(w, req, location, http.StatusTemporaryRedirect)
+			}))
+			defer source.Close()
+
+			var inheritedPolicyCalls atomic.Int64
+			base := &http.Client{
+				CheckRedirect: func(*http.Request, []*http.Request) error {
+					inheritedPolicyCalls.Add(1)
+					return nil
+				},
+			}
+			cfg := Config{SkipAuth: new(true)}
+			var options clientOptions
+			if test.signed {
+				cfg = Config{
+					Service: new("aws-mcp"),
+					Region:  new("us-east-1"),
+				}
+				options.Credentials = &staticCredentials{creds: aws.Credentials{
+					AccessKeyID:     "AKIA",
+					SecretAccessKey: "secret",
+				}}
+			}
+
+			client, err := newClient(t.Context(), cfg, base, options)
+			if err != nil {
+				t.Fatalf("newClient() error = %v", err)
+			}
+			resp, err := client.Get(source.URL + "/start")
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if err := resp.Body.Close(); err != nil {
+				t.Fatalf("response body close: %v", err)
+			}
+
+			if resp.StatusCode != http.StatusTemporaryRedirect {
+				t.Errorf("Get() status = %d, want %d", resp.StatusCode, http.StatusTemporaryRedirect)
+			}
+			if got := redirectedRequests.Load(); got != 0 {
+				t.Errorf("redirected request count = %d, want 0", got)
+			}
+			if got := inheritedPolicyCalls.Load(); got != 0 {
+				t.Errorf("inherited redirect policy call count = %d, want 0", got)
+			}
+		})
+	}
 }
 
 func TestSigningRoundTripperSignsClonedRequest(t *testing.T) {
@@ -492,19 +571,18 @@ func TestUpstreamErrorRoundTripperLogsSafeHTTPErrorDetails(t *testing.T) {
 	req.URL.RawQuery = "token=secret"
 	req.Header.Set("Authorization", "secret-auth")
 	resp, err := transport.RoundTrip(req)
-	if err != nil {
-		t.Fatalf("RoundTrip() error = %v", err)
+	if resp != nil {
+		t.Fatalf("RoundTrip() response = %#v, want nil", resp)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusForbidden)
+	httpErr, ok := errors.AsType[*upstreamHTTPError](err)
+	if !ok {
+		t.Fatalf("RoundTrip() error = %T %v, want *upstreamHTTPError", err, err)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		t.Fatalf("ReadAll(response body) error = %v", err)
+	if httpErr.statusCode != http.StatusForbidden || httpErr.jsonrpcMessage != "denied" {
+		t.Fatalf("upstream error = %#v, want forbidden JSON-RPC denial", httpErr)
 	}
-	if !strings.Contains(string(body), `"message":"denied"`) {
-		t.Fatalf("response body = %q, want JSON-RPC error", body)
+	if httpErr.jsonrpcData != `{"reason":"policy"}` {
+		t.Fatalf("JSON-RPC data = %q, want policy reason", httpErr.jsonrpcData)
 	}
 
 	got := logs.String()
@@ -536,19 +614,76 @@ func TestUpstreamErrorRoundTripperCapsResponseBodyExcerpt(t *testing.T) {
 	transport := upstreamErrorRoundTripper{base: base, logger: logger}
 
 	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+	if resp != nil {
+		t.Fatalf("RoundTrip() response = %#v, want nil", resp)
+	}
+	httpErr, ok := errors.AsType[*upstreamHTTPError](err)
+	if !ok {
+		t.Fatalf("RoundTrip() error = %T %v, want *upstreamHTTPError", err, err)
+	}
+	if len(httpErr.bodyExcerpt) != maxHTTPErrorBodyBytes || !httpErr.bodyTruncated {
+		t.Fatalf("upstream error excerpt length = %d, truncated = %v", len(httpErr.bodyExcerpt), httpErr.bodyTruncated)
+	}
+	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "response_body_truncated=true") {
+		t.Fatalf("log = %s, want WARN and truncation flag", got)
+	}
+}
+
+func TestUpstreamErrorRoundTripperPreservesNonPOSTResponses(t *testing.T) {
+	base := roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusMethodNotAllowed,
+			Status:     "405 Method Not Allowed",
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader("standalone SSE is unavailable")),
+			Request:    req,
+		}, nil
+	})
+	transport := upstreamErrorRoundTripper{base: base}
+	req, err := http.NewRequest(http.MethodGet, "https://aws-mcp.us-east-1.api.aws/mcp", nil)
+	if err != nil {
+		t.Fatalf("NewRequest() error = %v", err)
+	}
+
+	resp, err := transport.RoundTrip(req)
 	if err != nil {
 		t.Fatalf("RoundTrip() error = %v", err)
 	}
 	defer resp.Body.Close()
-	replayed, err := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusMethodNotAllowed)
+	}
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("ReadAll(response body) error = %v", err)
 	}
-	if string(replayed) != body {
-		t.Fatalf("response body = %q, want original body", replayed)
+	if string(body) != "standalone SSE is unavailable" {
+		t.Fatalf("response body = %q", body)
 	}
-	if got := logs.String(); !strings.Contains(got, "level=WARN") || !strings.Contains(got, "response_body_truncated=true") {
-		t.Fatalf("log = %s, want WARN and truncation flag", got)
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, time.September, 6, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name  string
+		value string
+		want  time.Duration
+	}{
+		{name: "seconds", value: "3", want: 3 * time.Second},
+		{name: "seconds_with_whitespace", value: " 3 ", want: 3 * time.Second},
+		{name: "seconds_bounded", value: "9223372036854775807", want: maxRetryDelay},
+		{name: "http_date", value: now.Add(5 * time.Second).Format(http.TimeFormat), want: 5 * time.Second},
+		{name: "zero", value: "0"},
+		{name: "past_date", value: now.Add(-time.Second).Format(http.TimeFormat)},
+		{name: "invalid", value: "soon"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := parseRetryAfter(test.value, now); got != test.want {
+				t.Fatalf("parseRetryAfter(%q) = %s, want %s", test.value, got, test.want)
+			}
+		})
 	}
 }
 
