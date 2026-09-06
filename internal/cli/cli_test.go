@@ -3,12 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
-	"errors"
-	"fmt"
-	"io"
 	"log/slog"
 	"os"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -95,11 +91,6 @@ func TestRunBindsDependenciesIntoAppRun(t *testing.T) {
 }
 
 func TestCredentialProcessStdinIsolation(t *testing.T) {
-	if os.Getenv("AWS_MCP_PROXY_CREDENTIAL_HELPER") == "1" {
-		credentialProcessHelper()
-		return
-	}
-
 	originalStdin := os.Stdin
 	pipeReader, pipeWriter, err := os.Pipe()
 	if err != nil {
@@ -124,18 +115,8 @@ func TestCredentialProcessStdinIsolation(t *testing.T) {
 		t.Fatalf("MCP transport writer = %T, want nopWriteCloser", transport.Writer)
 	}
 
-	executable, err := os.Executable()
-	if err != nil {
-		t.Fatalf("os.Executable() error = %v", err)
-	}
-	t.Setenv("AWS_MCP_PROXY_CREDENTIAL_HELPER", "1")
-	t.Setenv("AWS_MCP_PROXY_TEST_BINARY", executable)
-	command := `"$AWS_MCP_PROXY_TEST_BINARY" -test.run=^TestCredentialProcessStdinIsolation$`
-	if runtime.GOOS == "windows" {
-		// cmd.exe /C consumes an outer quote before parsing the quoted executable.
-		command = `""%AWS_MCP_PROXY_TEST_BINARY%" -test.run=^TestCredentialProcessStdinIsolation$"`
-	}
-	provider := processcreds.NewProvider(command)
+	t.Setenv("AWS_MCP_PROXY_CREDENTIAL_REQUIRE_EOF", "1")
+	provider := processcreds.NewProvider("go run ../../testdata/credential-process")
 	credentials, err := provider.Retrieve(t.Context())
 	if err != nil {
 		t.Fatalf("credential process Retrieve() error = %v", err)
@@ -143,16 +124,6 @@ func TestCredentialProcessStdinIsolation(t *testing.T) {
 	if credentials.AccessKeyID != "test-access-key" || credentials.SecretAccessKey != "test-secret-key" {
 		t.Fatalf("credentials = %#v", credentials)
 	}
-}
-
-func credentialProcessHelper() {
-	buffer := make([]byte, 1)
-	if _, err := os.Stdin.Read(buffer); !errors.Is(err, io.EOF) {
-		fmt.Fprintf(os.Stderr, "credential helper stdin error = %v, want EOF\n", err)
-		os.Exit(2)
-	}
-	fmt.Print(`{"Version":1,"AccessKeyId":"test-access-key","SecretAccessKey":"test-secret-key"}`)
-	os.Exit(0)
 }
 
 func TestIsolatedStdioTransportRestoresStdin(t *testing.T) {
