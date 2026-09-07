@@ -8,6 +8,13 @@ absolute so they resolve identically on GitHub and on the
 [documentation site](https://aws-mcp-proxy.ajbeck.dev/). Pending changes live
 in the release pull request rather than in an `Unreleased` section on `main`.
 
+## [1.0.1](https://github.com/ajbeck/go-aws-mcp-proxy/compare/v1.0.0...v1.0.1) (2026-09-07)
+
+
+### Bug Fixes
+
+* **release:** specify repository for GitHub CLI ([#42](https://github.com/ajbeck/go-aws-mcp-proxy/issues/42)) ([246aedb](https://github.com/ajbeck/go-aws-mcp-proxy/commit/246aedb2ebf0ba8a4565d492cee475b414672796))
+
 ## [1.0.0](https://github.com/ajbeck/go-aws-mcp-proxy/compare/v0.4.0...v1.0.0) (2026-09-06)
 
 
