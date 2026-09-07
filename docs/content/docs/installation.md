@@ -43,7 +43,7 @@ installed.
 
 ## Build from source
 
-The project builds with Go 1.26 and a small script runner:
+The project builds with Go 1.27 and a small script runner:
 
 ```bash
 go run ./cmd/scripts build

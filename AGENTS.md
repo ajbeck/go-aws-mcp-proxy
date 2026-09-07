@@ -3,7 +3,7 @@
 ## Project Structure & Modular Organization
 
 - `bin/aws-mcp-proxy` compiled application binary, output from `go run ./cmd/scripts build`
-- `cmd/aws-mcp-proxy` Go 1.26 application
+- `cmd/aws-mcp-proxy` Go 1.27 application
 - `internal/` Core application packages, not for export
 
 ## Build, Test, Run
