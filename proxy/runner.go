@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -337,7 +339,7 @@ func (r *proxyRun) discoverUpstreamTools(ctx context.Context, upstream UpstreamS
 	}
 
 	retries := retryCount(r.config.Retries)
-	for attempt := 0; attempt < retries; attempt++ {
+	for attempt := range retries {
 		if r.logger != nil {
 			r.logger.Warn("retrying suspicious empty initial tools/list", "attempt", attempt, "next_attempt", attempt+1)
 		}
@@ -607,9 +609,7 @@ func forwardedMeta(meta mcp.Meta) mcp.Meta {
 		return nil
 	}
 	forwarded := make(mcp.Meta, len(meta))
-	for key, value := range meta {
-		forwarded[key] = value
-	}
+	maps.Copy(forwarded, meta)
 	delete(forwarded, mcp.MetaKeyProtocolVersion)
 	delete(forwarded, mcp.MetaKeyClientInfo)
 	delete(forwarded, mcp.MetaKeyClientCapabilities)
@@ -699,10 +699,7 @@ func retryDelayWithJitter(attempt int, minimum time.Duration, jitter func(int64)
 	}
 
 	half := backoff / 2
-	delay := half + time.Duration(jitter(int64(backoff-half)+1))
-	if minimum > delay {
-		delay = minimum
-	}
+	delay := max(minimum, half+time.Duration(jitter(int64(backoff-half)+1)))
 	if delay > maxRetryDelay {
 		return maxRetryDelay
 	}
@@ -939,12 +936,7 @@ func argumentsAndProfile(arguments json.RawMessage, mode profileArgumentMode) (a
 }
 
 func allowedProfile(profile string, profiles []string) bool {
-	for _, allowed := range profiles {
-		if profile == allowed {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(profiles, profile)
 }
 
 func defaultProfile(profiles *[]string) *string {
@@ -958,11 +950,12 @@ func profileList(profiles []string) string {
 	if len(profiles) == 0 {
 		return ""
 	}
-	out := profiles[0]
+	var out strings.Builder
+	out.WriteString(profiles[0])
 	for _, profile := range profiles[1:] {
-		out += ", " + profile
+		out.WriteString(", " + profile)
 	}
-	return out
+	return out.String()
 }
 
 func toolErrorResult(toolName string, err error) *mcp.CallToolResult {
@@ -1107,9 +1100,7 @@ func requestMetadata(cfg Config, resolvedRegion ...string) map[string]string {
 	if region != "" {
 		metadata["AWS_REGION"] = region
 	}
-	for key, value := range value(cfg.Metadata) {
-		metadata[key] = value
-	}
+	maps.Copy(metadata, value(cfg.Metadata))
 	return metadata
 }
 
@@ -1125,9 +1116,7 @@ func metadataMiddleware(metadata map[string]string) mcp.Middleware {
 			for key, value := range metadata {
 				meta[key] = value
 			}
-			for key, value := range existing {
-				meta[key] = value
-			}
+			maps.Copy(meta, existing)
 			params.SetMeta(meta)
 			return next(ctx, method, req)
 		}

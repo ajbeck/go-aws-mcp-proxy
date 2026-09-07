@@ -343,8 +343,7 @@ func exitCode(stderr io.Writer, err error) int {
 	}
 
 	fmt.Fprintln(stderr, err)
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		return exitErr.ExitCode()
 	}
 

@@ -32,10 +32,8 @@ func TestAppRunBuildsProxyConfigAndLogger(t *testing.T) {
 	var stderr bytes.Buffer
 
 	application := &app{
-		proxyArguments: proxyArguments{
-			Endpoint: new("https://bedrock-agentcore.us-east-1.amazonaws.com/mcp"),
-			LogLevel: new("DEBUG"),
-		},
+		Endpoint: new("https://bedrock-agentcore.us-east-1.amazonaws.com/mcp"),
+		LogLevel: new("DEBUG"),
 	}
 
 	err := application.Run(t.Context(), lookupEnv(nil), run.call, &stderr)

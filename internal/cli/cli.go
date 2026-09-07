@@ -234,8 +234,7 @@ func exitCodeForError(err error) int {
 	}](err); ok {
 		return exitErr.ExitCode()
 	}
-	var parseErr *kong.ParseError
-	if errors.As(err, &parseErr) {
+	if parseErr, ok := errors.AsType[*kong.ParseError](err); ok {
 		return parseErr.ExitCode()
 	}
 	return exitError
