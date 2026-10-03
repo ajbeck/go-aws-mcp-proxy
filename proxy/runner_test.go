@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -286,6 +287,94 @@ func TestRunDefersUpstreamConnectForKiroCLIUntilToolsList(t *testing.T) {
 	if !session.closed {
 		t.Fatal("upstream session was not closed")
 	}
+}
+
+func TestRunForwardsUpstreamInstructions(t *testing.T) {
+	const upstreamInstructions = "Use aws___search_documentation before answering AWS questions."
+	tests := []struct {
+		name         string
+		clientName   string
+		lazyConnect  bool
+		instructions string
+		want         string
+	}{
+		{name: "upstream instructions", clientName: "test-client", instructions: upstreamInstructions, want: upstreamInstructions},
+		{name: "upstream without instructions", clientName: "test-client", want: defaultInstructions},
+		{name: "lazy connect", clientName: "test-client", lazyConnect: true, instructions: upstreamInstructions, want: defaultInstructions},
+		{name: "deferred client", clientName: "Kiro CLI", instructions: upstreamInstructions, want: defaultInstructions},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			serverTransport, clientTransport := mcp.NewInMemoryTransports()
+			session := &fakeSession{result: &mcp.InitializeResult{Instructions: tt.instructions}}
+			options := RunOptions{
+				Connector: &fakeConnector{sess: session},
+				Transport: serverTransport,
+				Version:   "test-version",
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			errs := make(chan error, 1)
+			go func() {
+				errs <- Run(ctx, Config{
+					Endpoint:        new("https://service.us-east-1.api.aws/mcp"),
+					AllowEmptyTools: new(true),
+					LazyConnect:     new(tt.lazyConnect),
+				}, options)
+			}()
+
+			result := legacyInitialize(t, ctx, clientTransport, tt.clientName)
+			if result.Instructions != tt.want {
+				t.Fatalf("Instructions = %q, want %q", result.Instructions, tt.want)
+			}
+			waitForProxyRunExit(t, ctx, errs)
+		})
+	}
+}
+
+// legacyInitialize sends an initialize request directly. The Go SDK client
+// negotiates with server/discover first, which does not exercise the proxy's
+// initialize handling.
+func legacyInitialize(t *testing.T, ctx context.Context, transport mcp.Transport, clientName string) *mcp.InitializeResult {
+	t.Helper()
+	conn, err := transport.Connect(ctx)
+	if err != nil {
+		t.Fatalf("transport.Connect() error = %v", err)
+	}
+	defer conn.Close()
+	params, err := json.Marshal(&mcp.InitializeParams{
+		ProtocolVersion: "2025-11-25",
+		ClientInfo:      &mcp.Implementation{Name: clientName, Version: "1.0.0"},
+		Capabilities:    &mcp.ClientCapabilities{},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	id, err := jsonrpc.MakeID(float64(1))
+	if err != nil {
+		t.Fatalf("jsonrpc.MakeID() error = %v", err)
+	}
+	if err := conn.Write(ctx, &jsonrpc.Request{ID: id, Method: "initialize", Params: params}); err != nil {
+		t.Fatalf("conn.Write() error = %v", err)
+	}
+	msg, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("conn.Read() error = %v", err)
+	}
+	resp, ok := msg.(*jsonrpc.Response)
+	if !ok {
+		t.Fatalf("initialize reply = %T, want *jsonrpc.Response", msg)
+	}
+	if resp.Error != nil {
+		t.Fatalf("initialize error = %v", resp.Error)
+	}
+	var result mcp.InitializeResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	return &result
 }
 
 func TestRunReturnsDeferredUpstreamConnectErrorDuringToolsList(t *testing.T) {
