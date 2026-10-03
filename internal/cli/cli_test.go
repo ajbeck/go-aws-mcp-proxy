@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"log/slog"
+	"maps"
 	"os"
 	"strings"
 	"testing"
@@ -176,6 +177,53 @@ func TestRunAcceptsGroupedProfilesAndMetadata(t *testing.T) {
 	}
 	if run.config.Retries == nil || *run.config.Retries != 10 {
 		t.Fatalf("Retries = %#v", run.config.Retries)
+	}
+}
+
+func TestRunAcceptsRepeatedHeaders(t *testing.T) {
+	run := &fakeProxyRun{}
+	var stderr bytes.Buffer
+
+	code := Run(t.Context(), []string{
+		"https://service.us-east-1.api.aws/mcp",
+		"--header", "x-tenant=acme",
+		"--header", "x-filter=a=b;c=d",
+	}, Options{
+		LookupEnv: lookupEnv(nil),
+		RunProxy:  run.call,
+		Stderr:    &stderr,
+	})
+
+	if code != exitOK {
+		t.Fatalf("Run() code = %d, stderr = %q", code, stderr.String())
+	}
+	want := map[string]string{"x-tenant": "acme", "x-filter": "a=b;c=d"}
+	if run.config.Headers == nil || !maps.Equal(*run.config.Headers, want) {
+		t.Fatalf("Headers = %#v, want %#v", run.config.Headers, want)
+	}
+}
+
+func TestRunRejectsReservedHeaders(t *testing.T) {
+	for _, name := range []string{"Authorization", "date", "X-Amz-Date", "x-amz-security-token"} {
+		t.Run(name, func(t *testing.T) {
+			run := &fakeProxyRun{}
+			var stderr bytes.Buffer
+			code := Run(t.Context(), []string{
+				"https://service.us-east-1.api.aws/mcp",
+				"--header", name + "=value",
+			}, Options{
+				LookupEnv: lookupEnv(nil),
+				RunProxy:  run.call,
+				Stderr:    &stderr,
+			})
+
+			if code == exitOK || run.called {
+				t.Fatalf("Run() code = %d, called = %v", code, run.called)
+			}
+			if !strings.Contains(stderr.String(), "set by SigV4 signing") {
+				t.Fatalf("stderr = %q", stderr.String())
+			}
+		})
 	}
 }
 

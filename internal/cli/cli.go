@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"time"
 
@@ -26,6 +27,9 @@ const (
 	exitNetwork       = 4
 	exitUpstream      = 5
 )
+
+// reservedHeaders are set by SigV4 signing and cannot be supplied with --header.
+var reservedHeaders = []string{"authorization", "date", "x-amz-date", "x-amz-security-token"}
 
 type RunProxy func(context.Context, proxy.Config, *slog.Logger) error
 
@@ -57,6 +61,7 @@ type proxyArguments struct {
 	CaBundle *string  `name:"ca-bundle" env:"AWS_CA_BUNDLE" help:"Path to a PEM certificate bundle to trust in addition to the system roots." placeholder:"PATH"`
 
 	Metadata map[string]string `type:"grouped-map" help:"Metadata to inject into MCP requests as key=value pairs." placeholder:"KEY=VALUE"`
+	Headers  map[string]string `name:"header" mapsep:"none" help:"Extra HTTP header as a key=value pair; repeat the flag for more. Covered by the SigV4 signature." placeholder:"KEY=VALUE"`
 
 	AllowEmptyTools *bool `name:"allow-empty-tools" help:"Allow an upstream endpoint to initialize with no tools."`
 	LazyConnect     *bool `name:"lazy-connect" help:"Defer credentials and the upstream connection until tools are requested."`
@@ -111,6 +116,11 @@ func (a *app) Run(ctx context.Context, lookupEnv LookupEnv, runProxy RunProxy, s
 func (a proxyArguments) Validate() error {
 	if enabled(a.SkipAuth) && enabled(a.OptionalAuth) {
 		return errors.New("--skip-auth and --optional-auth cannot be used together")
+	}
+	for name := range a.Headers {
+		if slices.Contains(reservedHeaders, strings.ToLower(name)) {
+			return fmt.Errorf("--header %s is not allowed: it is set by SigV4 signing. Reserved headers: %s", name, strings.Join(reservedHeaders, ", "))
+		}
 	}
 	if a.Retries != nil && (*a.Retries < 0 || *a.Retries > 10) {
 		return fmt.Errorf("--retries must be between 0 and 10, got %d", *a.Retries)
@@ -359,6 +369,9 @@ func (a proxyArguments) config(lookupEnv LookupEnv) proxy.Config {
 	}
 	if len(a.Metadata) > 0 {
 		cfg.Metadata = new(a.Metadata)
+	}
+	if len(a.Headers) > 0 {
+		cfg.Headers = new(a.Headers)
 	}
 	return cfg
 }
