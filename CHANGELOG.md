@@ -8,6 +8,18 @@ absolute so they resolve identically on GitHub and on the
 [documentation site](https://aws-mcp-proxy.ajbeck.dev/). Pending changes live
 in the release pull request rather than in an `Unreleased` section on `main`.
 
+## [1.1.0](https://github.com/ajbeck/go-aws-mcp-proxy/compare/v1.0.1...v1.1.0) (2026-10-04)
+
+
+### Features
+
+* **cli:** add --header for extra signed HTTP headers ([fa5feec](https://github.com/ajbeck/go-aws-mcp-proxy/commit/fa5feecbdf1508f5cad96300af0877b0f5d1bd5b))
+
+
+### Bug Fixes
+
+* **proxy:** forward upstream server instructions on initialize ([fa5feec](https://github.com/ajbeck/go-aws-mcp-proxy/commit/fa5feecbdf1508f5cad96300af0877b0f5d1bd5b))
+
 ## [1.0.1](https://github.com/ajbeck/go-aws-mcp-proxy/compare/v1.0.0...v1.0.1) (2026-09-07)
 
 
