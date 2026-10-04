@@ -162,6 +162,7 @@ func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 				return nil, fmt.Errorf("initialize params have unexpected type %T", req.GetParams())
 			}
 
+			var upstream UpstreamSession
 			if enabled(r.config.LazyConnect) || deferredInitializeClient(params) {
 				r.profiles.SetInitializeParams(params)
 				if r.logger != nil {
@@ -173,7 +174,9 @@ func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 					r.logger.Info("deferring upstream connect for MCP client", "client_name", clientName, "client_version", clientVersion, "configured", enabled(r.config.LazyConnect))
 				}
 			} else {
-				if _, err := r.ensureUpstreamReady(ctx, params); err != nil {
+				var err error
+				upstream, err = r.ensureUpstreamReady(ctx, params)
+				if err != nil {
 					return nil, classifyError(err)
 				}
 			}
@@ -184,8 +187,22 @@ func (r *proxyRun) initializeMiddleware() mcp.Middleware {
 				return nil, err
 			}
 
+			forwardInstructions(result, upstream)
 			return result, nil
 		}
+	}
+}
+
+// forwardInstructions replaces the proxy's default instructions with the
+// upstream server's, when the upstream provides them, so clients see guidance
+// written for the tools they are actually using.
+func forwardInstructions(result mcp.Result, upstream UpstreamSession) {
+	initResult, ok := result.(*mcp.InitializeResult)
+	if !ok || upstream == nil {
+		return
+	}
+	if upstreamResult := upstream.InitializeResult(); upstreamResult != nil && upstreamResult.Instructions != "" {
+		initResult.Instructions = upstreamResult.Instructions
 	}
 }
 

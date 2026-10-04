@@ -52,6 +52,11 @@ type acceptRoundTripper struct {
 	base http.RoundTripper
 }
 
+type extraHeadersRoundTripper struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
 type upstreamErrorRoundTripper struct {
 	base   http.RoundTripper
 	logger *slog.Logger
@@ -132,6 +137,9 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 	if err != nil {
 		return nil, err
 	}
+	if err := validateHeaders(value(cfg.Headers)); err != nil {
+		return nil, err
+	}
 
 	rt := base
 	if mode != authModeSkipped {
@@ -159,6 +167,10 @@ func newRoundTripper(ctx context.Context, cfg Config, base http.RoundTripper, op
 	}
 	if agent := userAgent(options, cfg.DisableTelemetry); agent != "" {
 		rt = userAgentRoundTripper{base: rt, userAgent: agent}
+	}
+	// Extra headers wrap the signer so they are covered by the signature.
+	if headers := value(cfg.Headers); len(headers) > 0 {
+		rt = extraHeadersRoundTripper{base: rt, headers: headers}
 	}
 	rt = upstreamErrorRoundTripper{base: rt, logger: options.Logger}
 	rt = acceptRoundTripper{base: rt}
@@ -433,6 +445,18 @@ func (t userAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, err
 	}
 	clone := req.Clone(req.Context())
 	clone.Header.Set("User-Agent", t.userAgent)
+	return t.base.RoundTrip(clone)
+}
+
+// RoundTrip adds the configured headers without overriding headers the MCP
+// transport set on the request.
+func (t extraHeadersRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	for name, value := range t.headers {
+		if clone.Header.Get(name) == "" {
+			clone.Header.Set(name, value)
+		}
+	}
 	return t.base.RoundTrip(clone)
 }
 

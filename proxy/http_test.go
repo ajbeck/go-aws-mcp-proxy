@@ -492,6 +492,73 @@ func TestNewRoundTripperRejectsConflictingAuthModes(t *testing.T) {
 	}
 }
 
+func TestNewRoundTripperSignsExtraHeaders(t *testing.T) {
+	base := &captureRoundTripper{}
+	credentials := &staticCredentials{creds: aws.Credentials{
+		AccessKeyID:     "AKIA",
+		SecretAccessKey: "secret",
+	}}
+	transport, err := newRoundTripper(t.Context(), Config{
+		Service: new("aws-mcp"),
+		Region:  new("us-east-1"),
+		Headers: new(map[string]string{"X-Tenant": "acme", "Content-Type": "text/plain"}),
+	}, base, clientOptions{Credentials: credentials})
+	if err != nil {
+		t.Fatalf("newRoundTripper() error = %v", err)
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("response body close: %v", err)
+	}
+	if got := base.request.Header.Get("X-Tenant"); got != "acme" {
+		t.Fatalf("X-Tenant = %q, want acme", got)
+	}
+	if got := base.request.Header.Get("Content-Type"); got != "application/json" {
+		t.Fatalf("Content-Type = %q, want the MCP transport's value", got)
+	}
+	if got := base.request.Header.Get("Authorization"); !strings.Contains(got, "x-tenant") {
+		t.Fatalf("Authorization = %q, want x-tenant in signed headers", got)
+	}
+}
+
+func TestNewRoundTripperSendsExtraHeadersWithSkipAuth(t *testing.T) {
+	base := &captureRoundTripper{}
+	transport, err := newRoundTripper(t.Context(), Config{
+		SkipAuth: new(true),
+		Headers:  new(map[string]string{"X-Tenant": "acme"}),
+	}, base, clientOptions{})
+	if err != nil {
+		t.Fatalf("newRoundTripper() error = %v", err)
+	}
+
+	resp, err := transport.RoundTrip(newJSONRequest(t, `{}`))
+	if err != nil {
+		t.Fatalf("RoundTrip() error = %v", err)
+	}
+	if err := resp.Body.Close(); err != nil {
+		t.Fatalf("response body close: %v", err)
+	}
+	if got := base.request.Header.Get("X-Tenant"); got != "acme" {
+		t.Fatalf("X-Tenant = %q, want acme", got)
+	}
+}
+
+func TestNewRoundTripperRejectsReservedHeaders(t *testing.T) {
+	for _, name := range []string{"Authorization", "date", "X-Amz-Date", "x-amz-security-token"} {
+		_, err := newRoundTripper(t.Context(), Config{
+			SkipAuth: new(true),
+			Headers:  new(map[string]string{name: "value"}),
+		}, http.DefaultTransport, clientOptions{})
+		if err == nil || !strings.Contains(err.Error(), "set by SigV4 signing") {
+			t.Fatalf("newRoundTripper(%s) error = %v, want reserved header error", name, err)
+		}
+	}
+}
+
 func TestNewHTTPClientAppliesTimeouts(t *testing.T) {
 	client, err := newClient(t.Context(), Config{
 		Timeout:        new(2 * time.Second),

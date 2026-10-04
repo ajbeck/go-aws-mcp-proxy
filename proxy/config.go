@@ -2,6 +2,9 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
+	"slices"
+	"strings"
 	"time"
 )
 
@@ -13,6 +16,7 @@ type Config struct {
 	Region   *string
 	CaBundle *string
 	Metadata *map[string]string
+	Headers  *map[string]string
 
 	AllowEmptyTools *bool
 	LazyConnect     *bool
@@ -29,6 +33,19 @@ type Config struct {
 	DisableTelemetry *bool
 	SkipAuth         *bool
 	OptionalAuth     *bool
+}
+
+// reservedHeaders are set by SigV4 signing and cannot be supplied as extra
+// headers.
+var reservedHeaders = []string{"authorization", "date", "x-amz-date", "x-amz-security-token"}
+
+func validateHeaders(headers map[string]string) error {
+	for name := range headers {
+		if slices.Contains(reservedHeaders, strings.ToLower(name)) {
+			return fmt.Errorf("--header %s is not allowed: it is set by SigV4 signing. Reserved headers: %s", name, strings.Join(reservedHeaders, ", "))
+		}
+	}
+	return nil
 }
 
 type authMode int
