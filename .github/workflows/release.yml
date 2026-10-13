@@ -173,7 +173,7 @@ jobs:
 
       - name: Generate SPDX SBOM
         # https://github.com/anchore/sbom-action/releases/tag/v0.24.2
-        uses: anchore/sbom-action@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26
+        uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c
         with:
           path: ${{ steps.build.outputs.contents }}
           format: spdx-json
@@ -196,7 +196,7 @@ jobs:
 
       - name: Upload packaged binary
         # https://github.com/actions/upload-artifact
-        uses: actions/upload-artifact@v7.0.1
+        uses: actions/upload-artifact@v7.0.2
         with:
           name: ${{ steps.build.outputs.asset }}
           path: |
@@ -218,7 +218,7 @@ jobs:
     steps:
       - name: Download release assets
         # https://github.com/actions/download-artifact
-        uses: actions/download-artifact@v8.0.1
+        uses: actions/download-artifact@v8.0.2
         with:
           path: dist
           merge-multiple: true
