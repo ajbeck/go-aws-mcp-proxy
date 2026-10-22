@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
-	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -297,9 +296,10 @@ func TestRunForwardsUpstreamInstructions(t *testing.T) {
 		lazyConnect  bool
 		instructions string
 		want         string
+		wantConnect  bool
 	}{
-		{name: "upstream instructions", clientName: "test-client", instructions: upstreamInstructions, want: upstreamInstructions},
-		{name: "upstream without instructions", clientName: "test-client", want: defaultInstructions},
+		{name: "upstream instructions", clientName: "test-client", instructions: upstreamInstructions, want: upstreamInstructions, wantConnect: true},
+		{name: "upstream without instructions", clientName: "test-client", want: defaultInstructions, wantConnect: true},
 		{name: "lazy connect", clientName: "test-client", lazyConnect: true, instructions: upstreamInstructions, want: defaultInstructions},
 		{name: "deferred client", clientName: "Kiro CLI", instructions: upstreamInstructions, want: defaultInstructions},
 	}
@@ -307,8 +307,9 @@ func TestRunForwardsUpstreamInstructions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			serverTransport, clientTransport := mcp.NewInMemoryTransports()
 			session := &fakeSession{result: &mcp.InitializeResult{Instructions: tt.instructions}}
+			connector := &fakeConnector{sess: session}
 			options := RunOptions{
-				Connector: &fakeConnector{sess: session},
+				Connector: connector,
 				Transport: serverTransport,
 				Version:   "test-version",
 			}
@@ -325,56 +326,27 @@ func TestRunForwardsUpstreamInstructions(t *testing.T) {
 				}, options)
 			}()
 
-			result := legacyInitialize(t, ctx, clientTransport, tt.clientName)
+			client := mcp.NewClient(&mcp.Implementation{Name: tt.clientName, Version: "1.0.0"}, nil)
+			clientSession, err := client.Connect(ctx, clientTransport, nil)
+			if err != nil {
+				t.Fatalf("client.Connect() error = %v", err)
+			}
+			result := clientSession.InitializeResult()
+			if result.ProtocolVersion >= statelessProtocolVersion {
+				t.Fatalf("ProtocolVersion = %q, want a handshake version", result.ProtocolVersion)
+			}
+			if connector.called != tt.wantConnect {
+				t.Fatalf("connector called during initialize = %v, want %v", connector.called, tt.wantConnect)
+			}
 			if result.Instructions != tt.want {
 				t.Fatalf("Instructions = %q, want %q", result.Instructions, tt.want)
+			}
+			if err := clientSession.Close(); err != nil {
+				t.Fatalf("clientSession.Close() error = %v", err)
 			}
 			waitForProxyRunExit(t, ctx, errs)
 		})
 	}
-}
-
-// legacyInitialize sends an initialize request directly. The Go SDK client
-// negotiates with server/discover first, which does not exercise the proxy's
-// initialize handling.
-func legacyInitialize(t *testing.T, ctx context.Context, transport mcp.Transport, clientName string) *mcp.InitializeResult {
-	t.Helper()
-	conn, err := transport.Connect(ctx)
-	if err != nil {
-		t.Fatalf("transport.Connect() error = %v", err)
-	}
-	defer conn.Close()
-	params, err := json.Marshal(&mcp.InitializeParams{
-		ProtocolVersion: "2025-11-25",
-		ClientInfo:      &mcp.Implementation{Name: clientName, Version: "1.0.0"},
-		Capabilities:    &mcp.ClientCapabilities{},
-	})
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-	id, err := jsonrpc.MakeID(float64(1))
-	if err != nil {
-		t.Fatalf("jsonrpc.MakeID() error = %v", err)
-	}
-	if err := conn.Write(ctx, &jsonrpc.Request{ID: id, Method: "initialize", Params: params}); err != nil {
-		t.Fatalf("conn.Write() error = %v", err)
-	}
-	msg, err := conn.Read(ctx)
-	if err != nil {
-		t.Fatalf("conn.Read() error = %v", err)
-	}
-	resp, ok := msg.(*jsonrpc.Response)
-	if !ok {
-		t.Fatalf("initialize reply = %T, want *jsonrpc.Response", msg)
-	}
-	if resp.Error != nil {
-		t.Fatalf("initialize error = %v", resp.Error)
-	}
-	var result mcp.InitializeResult
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("json.Unmarshal() error = %v", err)
-	}
-	return &result
 }
 
 func TestRunReturnsDeferredUpstreamConnectErrorDuringToolsList(t *testing.T) {
@@ -2333,7 +2305,7 @@ func TestRunAppliesToolTimeout(t *testing.T) {
 	waitForProxyRunExit(t, ctx, errs)
 }
 
-func TestRunReturnsUpstreamConnectErrorDuringToolsList(t *testing.T) {
+func TestRunReturnsUpstreamConnectErrorDuringInitialize(t *testing.T) {
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	wantErr := errors.New("connect failed")
 	connector := &fakeConnector{err: wantErr}
@@ -2352,15 +2324,11 @@ func TestRunReturnsUpstreamConnectErrorDuringToolsList(t *testing.T) {
 	}()
 
 	client := mcp.NewClient(&mcp.Implementation{Name: "test-client", Version: "1.0.0"}, nil)
-	clientSession, err := client.Connect(ctx, clientTransport, nil)
-	if err != nil {
-		t.Fatalf("client.Connect() error = %v", err)
-	}
-	if _, err := clientSession.ListTools(ctx, &mcp.ListToolsParams{}); err == nil {
-		t.Fatal("ListTools() error = nil")
+	if _, err := client.Connect(ctx, clientTransport, nil); err == nil || !strings.Contains(err.Error(), wantErr.Error()) {
+		t.Fatalf("client.Connect() error = %v, want upstream connect error", err)
 	}
 	if !connector.called {
-		t.Fatal("upstream connector was not called during tools/list")
+		t.Fatal("upstream connector was not called during initialize")
 	}
 
 	cancel()

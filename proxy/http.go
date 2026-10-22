@@ -653,6 +653,11 @@ func httpErrorLogLevel(req *http.Request, statusCode int) slog.Level {
 	if statusCode == http.StatusMethodNotAllowed && (req.Method == http.MethodGet || req.Method == http.MethodDelete) {
 		return slog.LevelDebug
 	}
+	// Endpoints that predate the stateless protocol reject server/discover,
+	// and the MCP client falls back to the initialize handshake.
+	if req.Method == http.MethodPost && req.Header.Get("Mcp-Method") == "server/discover" {
+		return slog.LevelDebug
+	}
 	switch statusCode {
 	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return slog.LevelWarn

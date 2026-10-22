@@ -492,6 +492,20 @@ func TestNewRoundTripperRejectsConflictingAuthModes(t *testing.T) {
 	}
 }
 
+func TestHTTPErrorLogLevelTreatsRejectedDiscoverAsDebug(t *testing.T) {
+	discover := newJSONRequest(t, `{}`)
+	discover.Header.Set("Mcp-Method", "server/discover")
+	if got := httpErrorLogLevel(discover, http.StatusBadRequest); got != slog.LevelDebug {
+		t.Fatalf("server/discover level = %v, want %v", got, slog.LevelDebug)
+	}
+
+	initialize := newJSONRequest(t, `{}`)
+	initialize.Header.Set("Mcp-Method", "initialize")
+	if got := httpErrorLogLevel(initialize, http.StatusBadRequest); got != slog.LevelError {
+		t.Fatalf("initialize level = %v, want %v", got, slog.LevelError)
+	}
+}
+
 func TestNewRoundTripperSignsExtraHeaders(t *testing.T) {
 	base := &captureRoundTripper{}
 	credentials := &staticCredentials{creds: aws.Credentials{

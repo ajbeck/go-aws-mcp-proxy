@@ -28,7 +28,20 @@ const (
 	defaultTitle         = "MCP Proxy for AWS"
 	defaultInstructions  = "MCP Proxy for AWS provides access to SigV4 protected MCP servers through a single interface."
 	jsonRPCServerClosing = -32004
+	// statelessProtocolVersion is the first MCP revision without the
+	// initialize handshake.
+	statelessProtocolVersion = "2026-07-28"
 )
+
+// handshakeProtocolVersions returns the SDK's supported protocol versions that
+// use the initialize handshake, newest first. The proxy offers only these to
+// MCP clients, so every client goes through initialize, where the proxy
+// connects upstream and forwards the upstream instructions.
+func handshakeProtocolVersions() []string {
+	return slices.DeleteFunc(mcp.SupportedProtocolVersions(), func(version string) bool {
+		return version >= statelessProtocolVersion
+	})
+}
 
 // UpstreamConnector opens an MCP client session to the configured upstream.
 type UpstreamConnector interface {
@@ -147,6 +160,7 @@ func (r *proxyRun) newServer() *mcp.Server {
 		Capabilities: &mcp.ServerCapabilities{
 			Tools: &mcp.ToolCapabilities{ListChanged: true},
 		},
+		SupportedProtocolVersions: handshakeProtocolVersions(),
 	})
 }
 
@@ -1084,6 +1098,7 @@ func (c mcpUpstreamConnector) Connect(ctx context.Context, cfg Config, params *m
 			HTTPClient:           httpClient,
 			MaxRetries:           transportRetryCount(cfg.Retries),
 		}, nil)
+
 		if err == nil {
 			return session, nil
 		}
